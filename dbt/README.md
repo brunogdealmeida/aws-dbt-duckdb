@@ -23,7 +23,14 @@ ingestion/ingest_csv.py --> s3://<landing bucket>/bronze/<source>/*.csv
 Terraform owns the landing bucket, the S3 Tables bucket/namespace, the
 Glue/Lake Formation federation and the Athena workgroup. dbt owns the actual
 Iceberg tables (schema, materialization) inside the `silver` namespace — see
-`dbt/macros/attach_s3_tables.sql` for how the write path is wired up.
+the `prod` target's `attach`/`secrets` in `dbt/profiles.yml` for the S3
+Tables connection, and `dbt/macros/materialization_iceberg_table.sql` for
+how models are written (dbt-duckdb's built-in materializations don't work
+against this catalog — see `DEPLOYMENT.md` §7 for why).
+
+**Athena currently can't read tables DuckDB writes** — a confirmed upstream
+DuckDB/Athena Iceberg compatibility gap, not a config issue. See
+`DEPLOYMENT.md` §7a before spending time debugging Athena queries.
 
 ## CI/CD flow
 

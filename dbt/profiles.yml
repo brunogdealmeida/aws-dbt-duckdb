@@ -9,10 +9,17 @@ aws_lakehouse:
       path: /tmp/dbt_dev.duckdb
       threads: 4
 
-    # Runs inside ECS: attaches the S3 Tables bucket and the landing bucket
-    # via the on-run-start hook in dbt_project.yml
-    # (see dbt/macros/attach_s3_tables.sql). Credentials come from the ECS
-    # task role through DuckDB's S3 credential_chain provider.
+    # Runs inside ECS. Credentials come from the ECS task role through
+    # DuckDB's S3 credential_chain provider — no keys embedded anywhere.
+    #
+    # attach/secrets are profile-level (not an on-run-start hook) on purpose:
+    # dbt-duckdb applies them every time it opens a *new* physical
+    # connection, including the internal ones it opens before running any
+    # model or hook to cache existing schemas in every database referenced
+    # by a model config (here, "s3_tables"). A hook-based ATTACH runs too
+    # late for that cache query and fails with `Catalog "s3_tables" does
+    # not exist` — confirmed by reproducing it with `dbt --debug` against
+    # the real bucket.
     prod:
       type: duckdb
       path: /tmp/dbt.duckdb
@@ -21,3 +28,15 @@ aws_lakehouse:
         - httpfs
         - aws
         - iceberg
+      secrets:
+        - type: s3
+          name: s3_tables_secret
+          provider: credential_chain
+          region: "{{ env_var('AWS_REGION', 'us-east-1') }}"
+      attach:
+        - path: "arn:aws:s3tables:{{ env_var('AWS_REGION', 'us-east-1') }}:{{ env_var('AWS_ACCOUNT_ID') }}:bucket/{{ env_var('S3_TABLE_BUCKET') }}"
+          alias: s3_tables
+          type: iceberg
+          secret: s3_tables_secret
+          options:
+            endpoint_type: s3_tables

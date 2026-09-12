@@ -1,5 +1,3 @@
-{{ config(materialized='table') }}
-
 select
     cast(product_id as bigint) as product_id,
     cast(warehouse_id as integer) as warehouse_id,

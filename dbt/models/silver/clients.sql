@@ -1,5 +1,3 @@
-{{ config(materialized='table') }}
-
 select
     cast(customer_id as bigint) as customer_id,
     trim(name) as name,
