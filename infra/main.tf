@@ -165,10 +165,19 @@ data "aws_iam_policy_document" "github_assume" {
       values   = ["sts.amazonaws.com"]
     }
 
+    # Every job that assumes this role specifies `environment: <env>` (see
+    # deploy.yml / terraform.yml), which makes GitHub mint the OIDC token
+    # with an environment-scoped `sub` claim (repo:OWNER/REPO:environment:X)
+    # instead of the more commonly documented ref-scoped one
+    # (repo:OWNER/REPO:ref:refs/heads/X). Allow both so this doesn't break
+    # if a future workflow assumes the role without an `environment:` key.
     condition {
       test     = "StringLike"
       variable = "token.actions.githubusercontent.com:sub"
-      values   = ["repo:${var.github_repository}:ref:refs/heads/${var.github_branch}"]
+      values = [
+        "repo:${var.github_repository}:environment:${var.environment}",
+        "repo:${var.github_repository}:ref:refs/heads/${var.github_branch}"
+      ]
     }
   }
 }
