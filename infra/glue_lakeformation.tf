@@ -123,13 +123,22 @@ resource "awscc_glue_catalog" "s3tables" {
 
 # Let the ECS task role (dbt/ingestion) and any additional reader principals
 # query the silver namespace through Athena via Lake Formation.
-resource "aws_lakeformation_permissions" "silver_readers" {
-  for_each = var.enable_lakeformation_s3tables_integration ? toset(concat(
+#
+# Uses `count` (not `for_each`) on purpose: the ECS task role ARN isn't known
+# until it's created, and for_each requires its full key set to be known at
+# plan time on a from-scratch apply, while count only needs the *length* of
+# the list, which is always known statically.
+locals {
+  silver_reader_principals = concat(
     [aws_iam_role.ecs_task.arn],
     var.athena_reader_principal_arns
-  )) : []
+  )
+}
 
-  principal   = each.value
+resource "aws_lakeformation_permissions" "silver_readers" {
+  count = var.enable_lakeformation_s3tables_integration ? length(local.silver_reader_principals) : 0
+
+  principal   = local.silver_reader_principals[count.index]
   permissions = ["DESCRIBE", "SELECT"]
 
   table {
