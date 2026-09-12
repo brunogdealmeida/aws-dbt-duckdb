@@ -1,0 +1,23 @@
+aws_lakehouse:
+  target: "{{ env_var('DBT_TARGET', 'dev') }}"
+
+  outputs:
+    # Pure local run: no AWS access, no S3 Tables attach. Used by CI (dbt
+    # parse/compile) and local development against sample data only.
+    dev:
+      type: duckdb
+      path: /tmp/dbt_dev.duckdb
+      threads: 4
+
+    # Runs inside ECS: attaches the S3 Tables bucket and the landing bucket
+    # via the on-run-start hook in dbt_project.yml
+    # (see dbt/macros/attach_s3_tables.sql). Credentials come from the ECS
+    # task role through DuckDB's S3 credential_chain provider.
+    prod:
+      type: duckdb
+      path: /tmp/dbt.duckdb
+      threads: 4
+      extensions:
+        - httpfs
+        - aws
+        - iceberg

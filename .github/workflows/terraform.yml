@@ -1,0 +1,111 @@
+name: Terraform
+
+on:
+  pull_request:
+    paths:
+      - "infra/**"
+      - ".github/workflows/terraform.yml"
+  push:
+    branches: [main]
+    paths:
+      - "infra/**"
+      - ".github/workflows/terraform.yml"
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    environment: dev
+
+    defaults:
+      run:
+        working-directory: infra
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Write backend + tfvars config
+        run: |
+          cat > backend.hcl <<EOF
+          bucket         = "${{ vars.TF_STATE_BUCKET }}"
+          key            = "${{ vars.TF_STATE_KEY }}"
+          region         = "${{ vars.AWS_REGION }}"
+          dynamodb_table = "${{ vars.TF_STATE_LOCK_TABLE }}"
+          EOF
+
+          cat > terraform.tfvars.json <<EOF
+          {
+            "aws_region": "${{ vars.AWS_REGION }}",
+            "project_name": "${{ vars.PROJECT_NAME }}",
+            "environment": "${{ vars.ENVIRONMENT }}",
+            "github_repository": "${{ github.repository }}",
+            "github_branch": "main",
+            "landing_bucket_name": "${{ vars.LANDING_BUCKET_NAME }}",
+            "s3_tables_bucket_name": "${{ vars.S3_TABLES_BUCKET_NAME }}",
+            "s3_tables_namespace": "${{ vars.S3_TABLES_NAMESPACE }}",
+            "athena_results_bucket_name": "${{ vars.ATHENA_RESULTS_BUCKET_NAME }}",
+            "lakeformation_admin_arns": ${{ vars.LAKEFORMATION_ADMIN_ARNS || '[]' }},
+            "athena_reader_principal_arns": ${{ vars.ATHENA_READER_PRINCIPAL_ARNS || '[]' }}
+          }
+          EOF
+
+      - run: terraform fmt -check
+      - run: terraform init -backend-config=backend.hcl
+      - run: terraform validate
+      - run: terraform plan -out=tfplan
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tfplan
+          path: infra/tfplan
+          retention-days: 5
+
+  apply:
+    needs: plan
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: dev # add required reviewers on this GitHub Environment to gate applies
+
+    defaults:
+      run:
+        working-directory: infra
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Write backend config
+        run: |
+          cat > backend.hcl <<EOF
+          bucket         = "${{ vars.TF_STATE_BUCKET }}"
+          key            = "${{ vars.TF_STATE_KEY }}"
+          region         = "${{ vars.AWS_REGION }}"
+          dynamodb_table = "${{ vars.TF_STATE_LOCK_TABLE }}"
+          EOF
+
+      - run: terraform init -backend-config=backend.hcl
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: tfplan
+          path: infra
+
+      - run: terraform apply -auto-approve tfplan

@@ -1,0 +1,18 @@
+name: aws_lakehouse
+version: '1.0.0'
+config-version: 2
+
+profile: aws_lakehouse
+
+model-paths: ["models"]
+macro-paths: ["macros"]
+
+on-run-start:
+  - "{{ attach_s3_tables() }}"
+
+models:
+  aws_lakehouse:
+    silver:
+      +materialized: table
+      +database: "{{ 's3_tables' if target.name == 'prod' else target.database }}"
+      +schema: "{{ env_var('S3_TABLES_NAMESPACE', 'silver') if target.name == 'prod' else 'silver' }}"

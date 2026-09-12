@@ -1,0 +1,17 @@
+version: 2
+
+sources:
+  - name: bronze
+    description: >
+      Raw files landed by the ingestion job. Read directly from S3 by
+      dbt-duckdb (no Glue/Athena catalog involved on the read side) via the
+      `external_location` meta config, so no attach/secret is required beyond
+      the httpfs S3 credentials already configured for the `prod` target.
+      The `dev` target reads the local sample CSV instead, so `dbt run
+      --target dev` works end-to-end without AWS access.
+    meta:
+      external_location: >-
+        {{ '../ingestion/sample_data/{name}.csv' if target.name != 'prod'
+        else 's3://' ~ env_var('LANDING_BUCKET', 'REPLACE_ME') ~ '/bronze/{name}/*.csv' }}
+    tables:
+      - name: orders

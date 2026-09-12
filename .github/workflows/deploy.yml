@@ -1,0 +1,104 @@
+name: Deploy Lakehouse
+
+on:
+  push:
+    branches: [main]
+
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Task mode to run after deployment"
+        required: true
+        default: "none"
+        type: choice
+        options:
+          - none
+          - dbt-build
+          - dbt-run
+          - dbt-test
+          - ingest
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+  ECS_CLUSTER: ${{ vars.ECS_CLUSTER }}
+  ECS_TASK_DEFINITION_FAMILY: ${{ vars.ECS_TASK_DEFINITION_FAMILY }}
+  ECS_SUBNETS: ${{ vars.ECS_SUBNETS }}
+  ECS_SECURITY_GROUPS: ${{ vars.ECS_SECURITY_GROUPS }}
+  ECS_ASSIGN_PUBLIC_IP: ${{ vars.ECS_ASSIGN_PUBLIC_IP }}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: dev
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials using OIDC
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push image
+        id: build-image
+        env:
+          REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker build -f dbt/Dockerfile -t "$REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" .
+          docker push "$REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+          echo "image=$REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Download current task definition
+        run: |
+          aws ecs describe-task-definition             --task-definition "$ECS_TASK_DEFINITION_FAMILY"             --query taskDefinition > task-definition.json
+
+      - name: Remove read-only ECS fields
+        run: |
+          python - <<'PY'
+          import json
+          p = "task-definition.json"
+          d = json.load(open(p))
+          for k in [
+              "taskDefinitionArn", "revision", "status",
+              "requiresAttributes", "compatibilities", "registeredAt",
+              "registeredBy", "enableFaultInjection"
+          ]:
+              d.pop(k, None)
+          json.dump(d, open(p, "w"))
+          PY
+
+      - name: Render task definition with new image
+        id: render
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: task-definition.json
+          container-name: lakehouse
+          image: ${{ steps.build-image.outputs.image }}
+
+      - name: Register new ECS task definition
+        id: register
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+        with:
+          task-definition: ${{ steps.render.outputs.task-definition }}
+          cluster: ${{ env.ECS_CLUSTER }}
+          wait-for-service-stability: false
+
+      - name: Run deployed task (optional)
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.mode != 'none' }}
+        env:
+          TASK_DEFINITION: ${{ steps.register.outputs.task-definition-arn }}
+          MODE: ${{ inputs.mode }}
+        run: |
+          aws ecs run-task             --cluster "$ECS_CLUSTER"             --task-definition "$TASK_DEFINITION"             --launch-type FARGATE             --network-configuration "awsvpcConfiguration={subnets=[$ECS_SUBNETS],securityGroups=[$ECS_SECURITY_GROUPS],assignPublicIp=$ECS_ASSIGN_PUBLIC_IP}"             --overrides "{"containerOverrides":[{"name":"lakehouse","environment":[{"name":"MODE","value":"$MODE"}]}]}"

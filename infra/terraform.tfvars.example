@@ -1,0 +1,30 @@
+aws_region            = "us-east-1"
+project_name          = "aws-duckdb-lakehouse"
+environment           = "dev"
+
+github_repository = "YOUR_ORG/YOUR_REPO"
+github_branch     = "main"
+
+landing_bucket_name   = "company-lakehouse-landing-dev"
+s3_tables_bucket_name = "company-lakehouse-tables-dev"
+s3_tables_namespace   = "silver"
+
+athena_results_bucket_name = "company-lakehouse-athena-results-dev"
+
+# Whoever runs `terraform apply` (and anyone else who should administer Lake
+# Formation) — required the first time this account uses Lake Formation.
+lakeformation_admin_arns = [
+  # "arn:aws:iam::123456789012:role/terraform-deploy",
+]
+
+# Extra principals (besides the ECS task role) allowed to query the silver
+# namespace from Athena.
+athena_reader_principal_arns = [
+  # "arn:aws:iam::123456789012:role/data-analyst",
+]
+
+enable_lakeformation_s3tables_integration = true
+force_destroy_buckets                     = true # dev only — set false in prod
+
+container_cpu    = 2048
+container_memory = 4096

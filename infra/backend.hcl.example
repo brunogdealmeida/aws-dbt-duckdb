@@ -1,0 +1,11 @@
+# Copy to backend.hcl (git-ignored) and fill in with the outputs from
+# `infra/bootstrap` (or your own pre-existing state bucket/lock table).
+#
+#   cd infra
+#   cp backend.hcl.example backend.hcl
+#   terraform init -backend-config=backend.hcl
+
+bucket         = "company-lakehouse-tfstate-dev"
+key            = "aws-dbt-duckdb/dev/terraform.tfstate"
+region         = "us-east-1"
+dynamodb_table = "company-lakehouse-tfstate-lock-dev"

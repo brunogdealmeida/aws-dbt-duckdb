@@ -1,0 +1,6 @@
+order_id,customer_id,order_date,amount,status
+1,101,2026-01-05,129.90,Paid
+2,102,2026-01-05,59.00,paid
+3,103,2026-01-06,15.50,PENDING
+4,104,2026-01-06,899.99,cancelled
+5,,2026-01-07,42.10,paid

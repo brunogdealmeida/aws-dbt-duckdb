@@ -1,0 +1,26 @@
+.DS_Store
+
+# Terraform
+infra/.terraform/
+infra/bootstrap/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+tfplan
+crash.log
+infra/backend.hcl
+infra/terraform.tfvars
+infra/terraform.tfvars.json
+infra/bootstrap/terraform.tfvars
+
+# dbt
+dbt/target/
+dbt/logs/
+dbt/dbt_packages/
+dbt/.user.yml
+*.duckdb
+
+# Python
+__pycache__/
+*.pyc
+.venv/
