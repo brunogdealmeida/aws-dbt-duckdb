@@ -501,11 +501,11 @@ aws logs get-log-events \
 ```
 
 Além disso, o arquivo de log **interno** do próprio dbt (`logs/dbt.log`,
-mais detalhado que o stdout) é enviado pro S3 depois de cada execução —
-ver `aws_s3_bucket.dbt_logs` em `infra/s3.tf` e o upload em
-`ingestion/entrypoint.py`:
+mais detalhado que o stdout) é enviado pro S3 depois de cada execução.
 
-- **Bucket**: `datalab-logs-dbt`
+- **Bucket**: `datalab-logs-dbt` (recurso `aws_s3_bucket.dbt_logs` em
+  `infra/s3.tf`, permissão `s3:PutObject` na `ecs_task` role em
+  `infra/main.tf`)
 - **Chave**: `dbt/<data-UTC>/<mode>/<task-id>/dbt.log`
 - **Retenção**: 90 dias (`dbt_logs_retention_days`)
 
@@ -514,10 +514,23 @@ aws s3 ls s3://datalab-logs-dbt/dbt/ --recursive
 aws s3 cp s3://datalab-logs-dbt/dbt/2026-09-12/dbt-build/<task-id>/dbt.log -
 ```
 
-O upload acontece num bloco `finally` em `entrypoint.py`, então roda mesmo
-se o `dbt build` falhar (é exatamente quando o log detalhado costuma ser
-mais útil) — e é best-effort: um erro no upload nunca mascara o código de
-saída real do dbt.
+**Código responsável** — `ingestion/entrypoint.py`:
+
+| O quê | Onde |
+|---|---|
+| Descobre o ID da task do ECS (pra bater com o nome do stream no CloudWatch) | função `_run_id()` |
+| Sobe cada arquivo de `logs/*` pro bucket, monta a chave `dbt/<data>/<mode>/<run_id>/<arquivo>` | função `upload_dbt_logs()` |
+| Chama o upload depois do `dbt build`/`run`/`test` | bloco `try/finally` no `if __name__ == "__main__":` no final do arquivo |
+
+O upload acontece dentro do `finally`, então roda mesmo se o comando dbt
+falhar (é exatamente quando o log detalhado costuma ser mais útil) — e é
+**best-effort**: qualquer exceção durante o upload é capturada e logada
+(`logger.exception`), nunca propagada, pra um problema de rede/permissão no
+S3 não mascarar o código de saída real do dbt (`sys.exit(result.returncode)`
+continua refletindo só o resultado do comando dbt em si). Se
+`DBT_LOG_BUCKET` não estiver setado (ex: rodando localmente sem essa env
+var), a função simplesmente retorna sem fazer nada — não é obrigatório
+pra rodar.
 
 ### 6.2 Onde ver a task rodando/rodada no Fargate
 
