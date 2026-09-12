@@ -56,7 +56,9 @@ jobs:
             "s3_tables_namespace": "${{ vars.S3_TABLES_NAMESPACE }}",
             "athena_results_bucket_name": "${{ vars.ATHENA_RESULTS_BUCKET_NAME }}",
             "lakeformation_admin_arns": ${{ vars.LAKEFORMATION_ADMIN_ARNS || '[]' }},
-            "athena_reader_principal_arns": ${{ vars.ATHENA_READER_PRINCIPAL_ARNS || '[]' }}
+            "athena_reader_principal_arns": ${{ vars.ATHENA_READER_PRINCIPAL_ARNS || '[]' }},
+            "enable_lakeformation_s3tables_integration": ${{ vars.ENABLE_LAKEFORMATION_S3TABLES_INTEGRATION || 'true' }},
+            "force_destroy_buckets": ${{ vars.FORCE_DESTROY_BUCKETS || 'false' }}
           }
           EOF
 

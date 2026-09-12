@@ -147,5 +147,9 @@ resource "aws_lakeformation_permissions" "silver_readers" {
     wildcard      = true
   }
 
-  depends_on = [awscc_glue_catalog.s3tables]
+  # GrantPermissions itself requires the calling principal to already be a
+  # Lake Formation data lake administrator — a separate permission layer on
+  # top of IAM, so this must not run before the admin registration below,
+  # even though nothing else ties them together in the dependency graph.
+  depends_on = [awscc_glue_catalog.s3tables, aws_lakeformation_data_lake_settings.this]
 }
