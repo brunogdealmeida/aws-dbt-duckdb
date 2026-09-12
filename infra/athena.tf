@@ -53,7 +53,7 @@ resource "aws_athena_workgroup" "lakehouse" {
 resource "aws_athena_data_catalog" "s3tables" {
   count = var.enable_lakeformation_s3tables_integration ? 1 : 0
 
-  name        = "${replace(var.project_name, "-", "_")}_s3tables"
+  name        = var.athena_data_catalog_name
   description = "Federated S3 Tables catalog for ${var.s3_tables_bucket_name}"
   type        = "GLUE"
 

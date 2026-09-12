@@ -10,6 +10,7 @@ s3_tables_bucket_name = "company-lakehouse-tables-dev"
 s3_tables_namespace   = "silver"
 
 athena_results_bucket_name = "company-lakehouse-athena-results-dev"
+athena_data_catalog_name   = "company-lakehouse-datalab"
 
 # Whoever runs `terraform apply` (and anyone else who should administer Lake
 # Formation) — required the first time this account uses Lake Formation.

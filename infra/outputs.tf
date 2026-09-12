@@ -47,3 +47,8 @@ output "athena_data_catalog_name" {
   description = "Pass as --query-execution-context Catalog=<this> (or select as Data source in the Athena console) to query the silver namespace, e.g. `SELECT * FROM silver.orders`."
   value       = var.enable_lakeformation_s3tables_integration ? aws_athena_data_catalog.s3tables[0].name : null
 }
+
+output "dbt_build_schedule_name" {
+  description = "EventBridge Scheduler schedule that runs `dbt build` on the ECS task (only set when enable_dbt_build_schedule = true)."
+  value       = var.enable_dbt_build_schedule ? aws_scheduler_schedule.dbt_build[0].name : null
+}

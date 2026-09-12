@@ -57,6 +57,11 @@ variable "athena_results_bucket_name" {
   type        = string
 }
 
+variable "athena_data_catalog_name" {
+  description = "Name of the Athena data source that exposes the federated S3 Tables catalog."
+  type        = string
+}
+
 variable "athena_reader_principal_arns" {
   description = "IAM principal ARNs (users/roles) that should be granted Lake Formation SELECT/DESCRIBE on the S3 Tables namespace so they can query it from Athena, in addition to the ECS task role."
   type        = list(string)
@@ -79,4 +84,16 @@ variable "force_destroy_buckets" {
   description = "Set true in dev to allow `terraform destroy` to delete non-empty S3 buckets. Keep false in prod."
   type        = bool
   default     = false
+}
+
+variable "enable_dbt_build_schedule" {
+  description = "Whether to create the EventBridge Scheduler schedule that runs the dbt-build ECS task on a recurring basis."
+  type        = bool
+  default     = true
+}
+
+variable "dbt_build_schedule_expression" {
+  description = "EventBridge schedule expression for the recurring dbt-build run. Default: daily at 03:00 UTC."
+  type        = string
+  default     = "cron(0 3 * * ? *)"
 }
