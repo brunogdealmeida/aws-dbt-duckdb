@@ -83,8 +83,8 @@ resource "aws_scheduler_schedule" "dbt_build" {
 
     ecs_parameters {
       task_definition_arn = "arn:aws:ecs:${var.aws_region}:${data.aws_caller_identity.current.account_id}:task-definition/${aws_ecs_task_definition.lakehouse.family}"
-      launch_type          = "FARGATE"
-      task_count           = 1
+      launch_type         = "FARGATE"
+      task_count          = 1
 
       network_configuration {
         subnets          = data.aws_subnets.default.ids
