@@ -2,6 +2,11 @@ data "aws_caller_identity" "current" {}
 
 data "aws_region" "current" {}
 
+locals {
+  github_owner     = split("/", var.github_repository)[0]
+  github_repo_name = split("/", var.github_repository)[1]
+}
+
 resource "aws_ecr_repository" "lakehouse" {
   name                 = "${var.project_name}-${var.environment}"
   image_tag_mutability = "IMMUTABLE"
@@ -167,16 +172,22 @@ data "aws_iam_policy_document" "github_assume" {
 
     # Every job that assumes this role specifies `environment: <env>` (see
     # deploy.yml / terraform.yml), which makes GitHub mint the OIDC token
-    # with an environment-scoped `sub` claim (repo:OWNER/REPO:environment:X)
-    # instead of the more commonly documented ref-scoped one
-    # (repo:OWNER/REPO:ref:refs/heads/X). Allow both so this doesn't break
-    # if a future workflow assumes the role without an `environment:` key.
+    # with an environment-scoped `sub` claim instead of the more commonly
+    # documented ref-scoped one. Allow both so this doesn't break if a
+    # future workflow assumes the role without an `environment:` key.
+    #
+    # GitHub also appends an immutable numeric ID to the owner and/or repo
+    # name (e.g. "octo-org@123/octo-repo@456" instead of "octo-org/octo-repo")
+    # to make the subject resistant to rename-based hijacking — confirmed
+    # empirically against a live token, since this isn't in GitHub's own
+    # trust-policy examples. The trailing `*` on each segment matches with
+    # or without that suffix.
     condition {
       test     = "StringLike"
       variable = "token.actions.githubusercontent.com:sub"
       values = [
-        "repo:${var.github_repository}:environment:${var.environment}",
-        "repo:${var.github_repository}:ref:refs/heads/${var.github_branch}"
+        "repo:${local.github_owner}*/${local.github_repo_name}*:environment:${var.environment}",
+        "repo:${local.github_owner}*/${local.github_repo_name}*:ref:refs/heads/${var.github_branch}"
       ]
     }
   }
