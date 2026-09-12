@@ -311,6 +311,32 @@ porque o `deploy.yml` registra novas revisões *fora* do Terraform
 número de revisão (`.../task-definition/<family>`, sem `:N`), fazendo o
 ECS sempre resolver pra última revisão ATIVA automaticamente.
 
+### 3.16 `S3_TABLE_BUCKET` errado na task definition, escondido havia semanas
+
+**Sintoma:** a primeira execução real do `dbt-build` via `aws ecs run-task`
+depois de configurar o upload de logs (§6) falhou com
+`Request to 's3tables.us-east-1.amazonaws.com/.../config?warehouse=...
+bucket%2Faws-dbt-duckdb-tables-770724966330' ... NotFound_404` — note o
+`aws-` no nome do bucket.
+**Causa:** exatamente o mecanismo descrito em §6.3, mas dessa vez causando
+um bug de verdade, não só um risco: a task definition foi criada pela
+**primeira vez** (bootstrap) quando `s3_tables_bucket_name` no
+`terraform.tfvars` ainda tinha o nome antigo (com `aws-`, antes da correção
+do item 3.4). O bucket em si foi corrigido depois, mas o valor do
+`S3_TABLE_BUCKET` ficou **congelado** na task definition por causa do
+`ignore_changes` — nenhum dos `terraform apply` seguintes corrigiu isso, e
+nenhum deploy via `deploy.yml` também (ele só troca a imagem). Passou
+despercebido porque todo teste anterior contra o `prod` target rodou
+localmente com as variáveis de ambiente setadas manualmente no terminal,
+nunca lendo o valor real gravado na task definition do ECS.
+**Correção:** registrada uma nova revisão (13) com `S3_TABLE_BUCKET`
+corrigido, usando o mesmo processo do §6.3.
+**Lição:** depois de qualquer rename de recurso referenciado por env var da
+task (bucket, namespace...), **sempre** conferir o valor real via
+`aws ecs describe-task-definition ... --query
+"taskDefinition.containerDefinitions[0].environment"` — não basta o
+`terraform apply` "não dar erro".
+
 ---
 
 ## 4. Como renomear buckets / namespace / catálogo do Athena
