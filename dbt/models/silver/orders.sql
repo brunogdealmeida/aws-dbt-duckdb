@@ -3,6 +3,8 @@
 select
     cast(order_id as bigint) as order_id,
     cast(customer_id as bigint) as customer_id,
+    cast(product_id as bigint) as product_id,
+    cast(quantity as integer) as quantity,
     cast(order_date as date) as order_date,
     cast(amount as decimal(18,2)) as amount,
     lower(trim(status)) as status

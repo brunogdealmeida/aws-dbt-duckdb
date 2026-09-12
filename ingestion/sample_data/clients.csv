@@ -1,0 +1,6 @@
+customer_id,name,email,country,signup_date,segment
+101,Client 101,client101@example.com,BR,2022-03-01,retail
+102,Client 102,client102@example.com,US,2022-04-15,Retail
+103,Client 103,client103@example.com,PT,2023-01-10,wholesale
+104,Client 104,,AR,2023-06-20,VIP
+105,Client 105,client105@example.com,MX,2024-02-05,vip

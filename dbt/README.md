@@ -51,3 +51,32 @@ DBT_PROFILES_DIR=. dbt build --target dev
 `LANDING_BUCKET` and `S3_TABLE_BUCKET` to be set and real AWS credentials
 available (e.g. via `aws sso login` / an assumed role) — Terraform sets these
 automatically for the ECS task.
+
+## Bronze entities and their relationships
+
+Three bronze sources feed the `silver` layer, and are relationally
+consistent by construction so they can be joined into a gold layer later:
+
+```text
+silver.orders.customer_id -> silver.clients.customer_id
+silver.orders.product_id  -> silver.inventory.product_id
+```
+
+`orders.amount` is derived from `inventory.unit_cost * quantity` (with some
+noise), so revenue/margin roll-ups in gold reconcile against inventory costs
+instead of being independent random numbers.
+
+`ingestion/sample_data/*.csv` has a handful of hand-written, FK-consistent
+rows per entity for local dev/CI. For volume testing, generate large fixtures
+with DuckDB directly:
+
+```bash
+python ingestion/generate_seed_data.py   # orders=5M, clients=100k, inventory=1M rows
+# writes to ingestion/seed_data/bronze/<entity>/<entity>.csv (gitignored, ~280 MB total)
+
+aws s3 sync ingestion/seed_data/bronze s3://<landing-bucket>/bronze/
+```
+
+Both bronze status columns (`orders.status`, `inventory.status`) and some FK
+columns are deliberately dirty (mixed casing, ~0.5-3% nulls) to exercise the
+cleaning logic in the silver models.

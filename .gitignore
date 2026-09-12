@@ -13,6 +13,10 @@ infra/terraform.tfvars
 infra/terraform.tfvars.json
 infra/bootstrap/terraform.tfvars
 
+# Generated large bronze seed data (millions of rows) — regenerate with
+# ingestion/generate_seed_data.py, don't commit.
+ingestion/seed_data/
+
 # dbt
 dbt/target/
 dbt/logs/

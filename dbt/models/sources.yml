@@ -15,3 +15,5 @@ sources:
         else 's3://' ~ env_var('LANDING_BUCKET', 'REPLACE_ME') ~ '/bronze/{name}/*.csv' }}
     tables:
       - name: orders
+      - name: clients
+      - name: inventory

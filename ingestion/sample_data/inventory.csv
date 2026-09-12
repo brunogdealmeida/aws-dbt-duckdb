@@ -1,0 +1,6 @@
+product_id,warehouse_id,category,quantity_on_hand,unit_cost,last_restock_date,status
+1,1,Electronics,120,199.90,2026-01-01,active
+2,2,Grocery,300,4.50,2026-01-03,ACTIVE
+3,1,Apparel,80,29.99,2026-01-02,Active
+4,3,Toys,50,14.75,2025-12-20,discontinued
+5,2,Home,200,59.00,2026-01-04,
