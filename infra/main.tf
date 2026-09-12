@@ -198,6 +198,19 @@ resource "aws_iam_role" "github_deploy" {
   assume_role_policy = data.aws_iam_policy_document.github_assume.json
 }
 
+# terraform.yml's apply job uses this same role to run `terraform apply`,
+# which needs to manage every service this config touches (S3, S3 Tables,
+# Glue, Lake Formation, Athena, ECS, ECR, IAM, CloudWatch...) plus the
+# Terraform state bucket/lock table — not just the narrower ECR/ECS actions
+# below. AdministratorAccess is the pragmatic choice for dev (least fragile
+# against new resource types); for prod, replace this with a scoped policy
+# and require GitHub Environment reviewers before terraform.yml's apply job
+# can run.
+resource "aws_iam_role_policy_attachment" "github_deploy_admin" {
+  role       = aws_iam_role.github_deploy.name
+  policy_arn = "arn:aws:iam::aws:policy/AdministratorAccess"
+}
+
 data "aws_iam_policy_document" "github_deploy" {
   statement {
     sid = "ECRPush"
