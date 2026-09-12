@@ -31,6 +31,17 @@ variable "s3_tables_bucket_name" {
   type = string
 }
 
+variable "dbt_logs_bucket_name" {
+  description = "S3 bucket where dbt's own log files (dbt/logs/*, distinct from CloudWatch's stdout/stderr capture) are uploaded after each run. Must be globally unique."
+  type        = string
+}
+
+variable "dbt_logs_retention_days" {
+  description = "Days to retain dbt log objects in S3 before automatic expiration."
+  type        = number
+  default     = 90
+}
+
 variable "container_cpu" {
   type    = number
   default = 2048

@@ -54,6 +54,7 @@ jobs:
             "landing_bucket_name": "${{ vars.LANDING_BUCKET_NAME }}",
             "s3_tables_bucket_name": "${{ vars.S3_TABLES_BUCKET_NAME }}",
             "s3_tables_namespace": "${{ vars.S3_TABLES_NAMESPACE }}",
+            "dbt_logs_bucket_name": "${{ vars.DBT_LOGS_BUCKET_NAME }}",
             "athena_results_bucket_name": "${{ vars.ATHENA_RESULTS_BUCKET_NAME }}",
             "athena_data_catalog_name": "${{ vars.ATHENA_DATA_CATALOG_NAME }}",
             "lakeformation_admin_arns": ${{ vars.LAKEFORMATION_ADMIN_ARNS || '[]' }},

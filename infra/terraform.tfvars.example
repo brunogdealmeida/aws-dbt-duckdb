@@ -9,6 +9,8 @@ landing_bucket_name   = "company-lakehouse-landing-dev"
 s3_tables_bucket_name = "company-lakehouse-tables-dev"
 s3_tables_namespace   = "silver"
 
+dbt_logs_bucket_name = "company-lakehouse-dbt-logs-dev"
+
 athena_results_bucket_name = "company-lakehouse-athena-results-dev"
 athena_data_catalog_name   = "company-lakehouse-datalab"
 

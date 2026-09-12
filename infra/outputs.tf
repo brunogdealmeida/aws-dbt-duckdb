@@ -48,6 +48,10 @@ output "athena_data_catalog_name" {
   value       = var.enable_lakeformation_s3tables_integration ? aws_athena_data_catalog.s3tables[0].name : null
 }
 
+output "dbt_logs_bucket_name" {
+  value = aws_s3_bucket.dbt_logs.bucket
+}
+
 output "dbt_build_schedule_name" {
   description = "EventBridge Scheduler schedule that runs `dbt build` on the ECS task (only set when enable_dbt_build_schedule = true)."
   value       = var.enable_dbt_build_schedule ? aws_scheduler_schedule.dbt_build[0].name : null
