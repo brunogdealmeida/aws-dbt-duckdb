@@ -1,12 +1,9 @@
-# Arquitetura — AWS Lakehouse (dbt + DuckDB + S3 Tables + Athena)
+# Arquitetura — AWS - Datalab Project (dbt + DuckDB + S3 Tables + Athena)
 
-Este documento descreve a arquitetura completa do projeto, tudo que foi
-criado na AWS, cada problema real encontrado ao colocar isso pra rodar (e
+Este documento descreve a arquitetura completa do projeto, o que foi
+criado na AWS, os problemas encontrados ao subir a stack (e
 como foi resolvido), como renomear os recursos principais, e como rodar o
 pipeline local e na AWS.
-
-> Referências complementares: `dbt/README.md` (visão geral rápida) e
-> `dbt/DEPLOYMENT.md` (passo a passo operacional de deploy).
 
 ---
 
@@ -41,8 +38,7 @@ ingestion/ingest_csv.py (ou generate_seed_data.py)
    Athena (data source `datalab-duckdb`)
 ```
 
-As três entidades da camada silver têm integridade referencial de verdade
-(FKs válidas por construção, não só por convenção), prontas para uma camada
+As três entidades da camada silver têm integridade referencial de verdade pra usar em uma futura camada
 gold:
 
 ```text
@@ -452,3 +448,117 @@ aws athena start-query-execution \
 ```
 Ou, no console do Athena, selecione `datalab-duckdb` no dropdown de "Data
 source" antes de consultar.
+
+---
+
+## 6. Logs e execução no Fargate
+
+### 6.1 Onde ver os logs
+
+Não existe um bucket com os logs "principais" — o log corrente (stdout/
+stderr do processo, o que aparece na tela durante o `dbt build`) vai pro
+**CloudWatch Logs**:
+
+- **Log group**: `/ecs/aws-duckdb-lakehouse/dev`
+- **Stream**: `lakehouse/lakehouse/<task-id>`
+- **Retenção**: 30 dias
+
+```bash
+# acompanhar ao vivo
+aws logs tail /ecs/aws-duckdb-lakehouse/dev --follow
+
+# um stream específico
+aws logs get-log-events \
+  --log-group-name "/ecs/aws-duckdb-lakehouse/dev" \
+  --log-stream-name "lakehouse/lakehouse/<task-id>" \
+  --query "events[].message" --output text
+```
+
+Além disso, o arquivo de log **interno** do próprio dbt (`logs/dbt.log`,
+mais detalhado que o stdout) é enviado pro S3 depois de cada execução —
+ver `aws_s3_bucket.dbt_logs` em `infra/s3.tf` e o upload em
+`ingestion/entrypoint.py`:
+
+- **Bucket**: `datalab-logs-dbt`
+- **Chave**: `dbt/<data-UTC>/<mode>/<task-id>/dbt.log`
+- **Retenção**: 90 dias (`dbt_logs_retention_days`)
+
+```bash
+aws s3 ls s3://datalab-logs-dbt/dbt/ --recursive
+aws s3 cp s3://datalab-logs-dbt/dbt/2026-09-12/dbt-build/<task-id>/dbt.log -
+```
+
+O upload acontece num bloco `finally` em `entrypoint.py`, então roda mesmo
+se o `dbt build` falhar (é exatamente quando o log detalhado costuma ser
+mais útil) — e é best-effort: um erro no upload nunca mascara o código de
+saída real do dbt.
+
+### 6.2 Onde ver a task rodando/rodada no Fargate
+
+**Console:** ECS → Clusters → `aws-duckdb-lakehouse-dev` → aba "Tasks"
+(mostra tasks rodando e as paradas recentemente — clique numa task pra ver
+CPU/memória, rede, e um link direto pro stream de log no CloudWatch).
+
+**CLI:**
+```bash
+# tasks rodando agora
+aws ecs list-tasks --cluster aws-duckdb-lakehouse-dev
+
+# tasks paradas recentemente (histórico limitado — não é permanente)
+aws ecs list-tasks --cluster aws-duckdb-lakehouse-dev --desired-status STOPPED
+
+# detalhes de uma task específica
+aws ecs describe-tasks --cluster aws-duckdb-lakehouse-dev --tasks <task-arn>
+```
+
+O histórico de tasks paradas no console/CLI do ECS **não é permanente** —
+pra rastrear execuções antigas de forma confiável, use o CloudWatch Logs
+(30 dias) ou o bucket de logs do dbt (90 dias), não a lista de tasks do
+ECS.
+
+Pra saber quando foi a próxima/última execução agendada:
+```bash
+aws scheduler get-schedule --name aws-duckdb-lakehouse-dev-dbt-build --group-name default
+```
+
+### 6.3 Cuidado ao mudar variáveis de ambiente da task definition
+
+A `aws_ecs_task_definition.lakehouse` (em `infra/main.tf`) tem
+`lifecycle { ignore_changes = [container_definitions] }` — isso existe de
+propósito, pra o Terraform não brigar com o `deploy.yml` (que registra
+novas revisões a cada deploy, trocando só a imagem). Só que isso tem uma
+consequência importante: **rodar `terraform apply` depois de adicionar uma
+env var nova ao `container_definitions` não propaga essa mudança pra task
+definition real** — o Terraform ignora esse campo depois da criação
+inicial.
+
+Como o `deploy.yml` sempre parte da task definition **atualmente
+registrada** (via `aws ecs describe-task-definition`) e só troca a imagem,
+uma env var nova só passa a existir nos próximos deploys se você registrar
+manualmente uma revisão nova que já a contenha — foi assim que
+`DBT_LOG_BUCKET` foi adicionado (revisão 10):
+
+```bash
+aws ecs describe-task-definition --task-definition aws-duckdb-lakehouse-dev \
+  --query "taskDefinition" --output json > taskdef.json
+
+python3 -c "
+import json
+d = json.load(open('taskdef.json'))
+for k in ['taskDefinitionArn','revision','status','requiresAttributes',
+          'compatibilities','registeredAt','registeredBy']:
+    d.pop(k, None)
+d['containerDefinitions'][0]['environment'].append(
+    {'name': 'MINHA_VAR_NOVA', 'value': 'valor'}
+)
+json.dump(d, open('taskdef.json', 'w'))
+"
+
+aws ecs register-task-definition --cli-input-json file://taskdef.json
+rm taskdef.json
+```
+
+Depois disso, a nova revisão vira a "base" — os próximos `git push`
+(que disparam o `deploy.yml`) vão carregar essa env var adiante
+automaticamente, já que cada deploy só troca a imagem em cima do que já
+está registrado.
