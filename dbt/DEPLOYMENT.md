@@ -144,9 +144,9 @@ none
 ```
 
 `none` only publishes the task definition. Run `ingest` before the first
-`dbt-run` — the `silver.orders` model reads from the `bronze` source, which
-only exists once ingestion has written at least one file to the landing
-bucket.
+`dbt-run` — the `silver.stg_orders` model reads from the `bronze` source,
+which only exists once ingestion has written at least one file to the
+landing bucket.
 
 ## 7. Write path — verified end-to-end against a real AWS account, including Athena
 
@@ -185,7 +185,7 @@ the notes below are confirmed facts, not speculation:
   [duckdb/duckdb-iceberg#488](https://github.com/duckdb/duckdb-iceberg/issues/488)).
   `dbt/Dockerfile` and `dbt/requirements.txt` are now pinned to
   `DUCKDB_VERSION=1.5.5` / `dbt-duckdb==1.11.0`, confirmed to fix it — same
-  5M-row `orders` table, read back correctly through Athena. As a bonus,
+  5M-row `stg_orders` table, read back correctly through Athena. As a bonus,
   the write itself got more than 2x faster (5M rows: ~18 min on 1.4.0 vs.
   ~8m45s on 1.5.5). If you bump `DUCKDB_VERSION` further, re-verify against
   Athena before trusting it — this is still a fast-moving part of DuckDB.
@@ -196,11 +196,12 @@ Verify after a run:
 aws s3tables list-tables --table-bucket-arn <s3_tables_bucket_arn> --namespace silver
 ```
 
-should show `orders`, `clients`, `inventory`. Query through DuckDB directly
-(attach exactly as `dbt/profiles.yml`'s `prod` target does) or through
-Athena (see §7a) — both return correct data, including joins across all
-three tables using `orders.customer_id -> clients.customer_id` and
-`orders.product_id -> inventory.product_id`.
+should show `stg_orders`, `stg_clients`, `stg_inventory`. Query through
+DuckDB directly (attach exactly as `dbt/profiles.yml`'s `prod` target does)
+or through Athena (see §7a) — both return correct data, including joins
+across all three tables using `stg_orders.customer_id ->
+stg_clients.customer_id` and `stg_orders.product_id ->
+stg_inventory.product_id`.
 
 ## 7a. Querying from Athena
 
@@ -218,7 +219,7 @@ Query with the `athena_data_catalog_name` Terraform output as the catalog:
 
 ```bash
 aws athena start-query-execution \
-  --query-string "SELECT * FROM silver.orders LIMIT 10" \
+  --query-string "SELECT * FROM silver.stg_orders LIMIT 10" \
   --work-group <athena_workgroup_name output> \
   --query-execution-context Catalog=<athena_data_catalog_name output>
 ```

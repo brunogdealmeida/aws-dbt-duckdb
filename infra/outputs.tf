@@ -44,7 +44,7 @@ output "glue_s3tables_catalog_id" {
 }
 
 output "athena_data_catalog_name" {
-  description = "Pass as --query-execution-context Catalog=<this> (or select as Data source in the Athena console) to query the silver namespace, e.g. `SELECT * FROM silver.orders`."
+  description = "Pass as --query-execution-context Catalog=<this> (or select as Data source in the Athena console) to query the silver namespace, e.g. `SELECT * FROM silver.stg_orders`."
   value       = var.enable_lakeformation_s3tables_integration ? aws_athena_data_catalog.s3tables[0].name : null
 }
 

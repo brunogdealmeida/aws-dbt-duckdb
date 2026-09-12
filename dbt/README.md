@@ -68,11 +68,11 @@ Three bronze sources feed the `silver` layer, and are relationally
 consistent by construction so they can be joined into a gold layer later:
 
 ```text
-silver.orders.customer_id -> silver.clients.customer_id
-silver.orders.product_id  -> silver.inventory.product_id
+silver.stg_orders.customer_id -> silver.stg_clients.customer_id
+silver.stg_orders.product_id  -> silver.stg_inventory.product_id
 ```
 
-`orders.amount` is derived from `inventory.unit_cost * quantity` (with some
+`stg_orders.amount` is derived from `stg_inventory.unit_cost * quantity` (with some
 noise), so revenue/margin roll-ups in gold reconcile against inventory costs
 instead of being independent random numbers.
 

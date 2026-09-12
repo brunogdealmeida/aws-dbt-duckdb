@@ -22,7 +22,7 @@ ingestion/ingest_csv.py (ou generate_seed_data.py)
    (lido via httpfs do DuckDB, sem catálogo — direto do S3)
             |
             v
-   dbt/models/silver/{orders,clients,inventory}.sql
+   dbt/models/silver/{stg_orders,stg_clients,stg_inventory}.sql
    (cast de tipos, normalização de texto, filtro de PK nula)
             |
             v
@@ -42,9 +42,9 @@ As três entidades da camada silver têm integridade referencial de verdade pra 
 gold:
 
 ```text
-orders.customer_id -> clients.customer_id
-orders.product_id  -> inventory.product_id
-orders.amount        é derivado de inventory.unit_cost * quantity (com ruído)
+stg_orders.customer_id -> stg_clients.customer_id
+stg_orders.product_id  -> stg_inventory.product_id
+stg_orders.amount        é derivado de stg_inventory.unit_cost * quantity (com ruído)
 ```
 
 ### 1.2 Execução / orquestração
@@ -426,7 +426,7 @@ dbt build --target prod
 ```
 
 Para rodar só um model específico (útil pra não esperar os 5M de linhas do
-`orders` toda vez): `dbt build --target prod --select clients inventory`.
+`stg_orders` toda vez): `dbt build --target prod --select stg_clients stg_inventory`.
 
 ### 5.3 Na AWS, via ECS (produção)
 
@@ -462,13 +462,13 @@ con.execute("INSTALL httpfs; INSTALL aws; INSTALL iceberg; LOAD httpfs; LOAD aws
 con.execute("CREATE SECRET s3_tables_secret (TYPE s3, PROVIDER credential_chain, REGION 'us-east-1');")
 con.execute("ATTACH IF NOT EXISTS 'arn:aws:s3tables:us-east-1:770724966330:bucket/dbt-duckdb-tables-770724966330' "
             "AS s3_tables (TYPE iceberg, ENDPOINT_TYPE s3_tables, SECRET s3_tables_secret);")
-con.execute("SELECT * FROM s3_tables.silver.orders LIMIT 10").fetchall()
+con.execute("SELECT * FROM s3_tables.silver.stg_orders LIMIT 10").fetchall()
 ```
 
 **Via Athena:**
 ```bash
 aws athena start-query-execution \
-  --query-string "SELECT * FROM silver.orders LIMIT 10" \
+  --query-string "SELECT * FROM silver.stg_orders LIMIT 10" \
   --work-group aws-duckdb-lakehouse-dev \
   --query-execution-context Catalog=datalab-duckdb
 ```
