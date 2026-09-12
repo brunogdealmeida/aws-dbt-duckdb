@@ -20,10 +20,15 @@
 
   {% if existing_relation is not none %}
     {#-- adapter.drop_relation() issues DROP ... CASCADE, unsupported on
-         Iceberg tables; a plain DROP TABLE works fine. #}
+         Iceberg tables; a plain DROP TABLE works fine. Committed on its own
+         before the CREATE below: newer duckdb-iceberg extension versions
+         reject creating a table with the same name deleted earlier in the
+         same still-open transaction ("Cannot create table deleted within a
+         transaction"). #}
     {% call statement('drop_existing') -%}
       drop table if exists {{ target_relation }}
     {%- endcall %}
+    {{ adapter.commit() }}
   {% endif %}
 
   {% call statement('main') -%}

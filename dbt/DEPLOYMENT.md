@@ -148,11 +148,11 @@ none
 only exists once ingestion has written at least one file to the landing
 bucket.
 
-## 7. Write path — verified against a real AWS account
+## 7. Write path — verified end-to-end against a real AWS account, including Athena
 
-This has been run end-to-end against real infrastructure (5M orders, 100k
-clients, 1M inventory rows), so the caveats below are confirmed facts, not
-speculation:
+This has been run against real infrastructure (5M orders, 100k clients, 1M
+inventory rows) all the way through to querying the result from Athena, so
+the notes below are confirmed facts, not speculation:
 
 - **dbt-duckdb's `attach`/`secrets` must be set in `profiles.yml`, not an
   `on-run-start` hook.** dbt-duckdb lists existing schemas in every database
@@ -169,14 +169,26 @@ speculation:
   DuckDB's Iceberg catalog integration doesn't support
   (`Not implemented Error: Alter Schema Entry`). Plain `DROP TABLE IF EXISTS`
   + `CREATE TABLE ... AS` both work, so that's what the custom
-  materialization does — a full drop-and-recreate every run. Don't add
-  `{{ config(materialized=...) }}` back into the model `.sql` files; it
-  overrides the project-level target-conditional config and silently
-  reverts to the broken standard materialization.
-- **Write throughput is not great**: the 5M-row `orders` model took ~18
-  minutes end-to-end (vs. seconds for the same transform against local
-  DuckDB). The bottleneck is the Iceberg REST catalog write path, not the
-  SQL itself — expect this to improve as DuckDB's iceberg extension matures.
+  materialization does — a full drop-and-recreate every run, with the DROP
+  committed in its own transaction before the CREATE starts (duckdb-iceberg
+  rejects creating a table with a name deleted earlier in the same
+  still-open transaction: `Cannot create table deleted within a
+  transaction`). Don't add `{{ config(materialized=...) }}` back into the
+  model `.sql` files; it overrides the project-level target-conditional
+  config and silently reverts to the broken standard materialization.
+- **DuckDB version matters a lot.** `DUCKDB_VERSION=1.4.0` (the version this
+  template originally shipped with) produces Iceberg metadata Athena/Trino
+  can't read at all (`GENERIC_INTERNAL_ERROR: Cannot invoke
+  "java.lang.Long.longValue()" because "value" is null` on any query,
+  including on a table *Athena itself created* once DuckDB did a single
+  `INSERT` into it — see
+  [duckdb/duckdb-iceberg#488](https://github.com/duckdb/duckdb-iceberg/issues/488)).
+  `dbt/Dockerfile` and `dbt/requirements.txt` are now pinned to
+  `DUCKDB_VERSION=1.5.5` / `dbt-duckdb==1.11.0`, confirmed to fix it — same
+  5M-row `orders` table, read back correctly through Athena. As a bonus,
+  the write itself got more than 2x faster (5M rows: ~18 min on 1.4.0 vs.
+  ~8m45s on 1.5.5). If you bump `DUCKDB_VERSION` further, re-verify against
+  Athena before trusting it — this is still a fast-moving part of DuckDB.
 
 Verify after a run:
 
@@ -184,51 +196,36 @@ Verify after a run:
 aws s3tables list-tables --table-bucket-arn <s3_tables_bucket_arn> --namespace silver
 ```
 
-should show `orders`, `clients`, `inventory`; and querying through DuckDB
-directly (attach exactly as `dbt/profiles.yml`'s `prod` target does) returns
-correct data, including joins across all three tables using
-`orders.customer_id -> clients.customer_id` and
+should show `orders`, `clients`, `inventory`. Query through DuckDB directly
+(attach exactly as `dbt/profiles.yml`'s `prod` target does) or through
+Athena (see §7a) — both return correct data, including joins across all
+three tables using `orders.customer_id -> clients.customer_id` and
 `orders.product_id -> inventory.product_id`.
 
-## 7a. Known limitation: Athena/Trino cannot currently read tables DuckDB wrote
+## 7a. Querying from Athena
 
-**Querying these tables from Athena fails**, even though the write path
-above works and the tables/schema are correctly visible via Glue:
+`infra/athena.tf`'s `aws_athena_data_catalog.s3tables` registers the
+`s3tablescatalog` Glue federation as an Athena **data source** — a separate
+registration step from the Glue federation itself
+(`awscc_glue_catalog.s3tables` in `infra/glue_lakeformation.tf`), and one
+that isn't visible via `aws athena list-data-catalogs` until it's done. Its
+`catalog-id` parameter **must include the table bucket name**
+(`<account_id>:s3tablescatalog/<bucket_name>`) — the bucket-less form
+(`<account_id>:s3tablescatalog` alone) resolves but returns no databases,
+confirmed against a live account.
 
-```text
-GENERIC_INTERNAL_ERROR: Cannot invoke "java.lang.Long.longValue()" because "value" is null
+Query with the `athena_data_catalog_name` Terraform output as the catalog:
+
+```bash
+aws athena start-query-execution \
+  --query-string "SELECT * FROM silver.orders LIMIT 10" \
+  --work-group <athena_workgroup_name output> \
+  --query-execution-context Catalog=<athena_data_catalog_name output>
 ```
 
-This happens on `SELECT * ... LIMIT 1` — it's not specific to `COUNT(*)` or
-any particular query. It also happens on a table *created by Athena itself*
-once DuckDB does a single `INSERT` into it — so it's not a metadata problem
-specific to DuckDB's `CREATE TABLE`, it's the row/manifest data DuckDB's
-Iceberg writer (1.4.0, as pinned in `dbt/Dockerfile`) produces. This is a
-known, currently-open upstream compatibility gap between DuckDB's Iceberg
-writer and Athena/Trino's Iceberg reader — see
-[duckdb/duckdb-iceberg#488](https://github.com/duckdb/duckdb-iceberg/issues/488)
-and the related
-[AWS re:Post thread](https://repost.aws/questions/QULgV-eK8mTD6f8f5ClSslUg/cannot-create-valid-iceberg-table-in-aws-athena).
-It is not something this project's configuration can work around.
-
-Until DuckDB's iceberg extension fixes this (watch the linked issue and bump
-`DUCKDB_VERSION` in `dbt/Dockerfile` when it does):
-
-- **Query the data via DuckDB directly** (attach the S3 Tables bucket the
-  same way `dbt/profiles.yml`'s `prod` target does) — this works correctly
-  and is how the row counts/joins above were verified.
-- Athena/Lake Formation/the `s3tablescatalog` Glue federation are still
-  fully provisioned and correctly wired (verified: `CREATE TABLE` +
-  `INSERT` + `SELECT` all work in Athena for tables Athena itself writes to)
-  — they'll work as soon as the upstream write-compatibility issue is fixed,
-  no infra changes needed.
-- Registering `s3tablescatalog` as an Athena **data source** is a manual,
-  one-time step not covered by Terraform (no clean provider support for it
-  yet): `aws athena create-data-catalog --name <name> --type GLUE --parameters catalog-id=<account_id>:s3tablescatalog/<s3_tables_bucket_name>`
-  — note the catalog-id must include the table bucket name; `<account_id>:s3tablescatalog`
-  alone doesn't resolve. Then query with
-  `--query-execution-context Catalog=<name>` and reference tables as
-  `<namespace>.<table>` (no catalog prefix in the SQL itself).
+or, in the Athena console, pick it from the **Data source** dropdown before
+querying. Reference tables as `<namespace>.<table>` — no catalog prefix
+needed in the SQL itself once the catalog is selected as context.
 
 ## 8. Production
 

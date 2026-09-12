@@ -39,6 +39,11 @@ output "athena_results_bucket" {
 }
 
 output "glue_s3tables_catalog_id" {
-  description = "Use this as the Data Source / Catalog in Athena to query S3 Tables (only set when enable_lakeformation_s3tables_integration = true)."
+  description = "Glue catalog-id for the federated S3 Tables catalog (informational — Athena needs the bucket-qualified form in athena_data_catalog_name below, not this one, to actually resolve databases)."
   value       = var.enable_lakeformation_s3tables_integration ? local.s3tables_catalog_id : null
+}
+
+output "athena_data_catalog_name" {
+  description = "Pass as --query-execution-context Catalog=<this> (or select as Data source in the Athena console) to query the silver namespace, e.g. `SELECT * FROM silver.orders`."
+  value       = var.enable_lakeformation_s3tables_integration ? aws_athena_data_catalog.s3tables[0].name : null
 }
