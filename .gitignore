@@ -29,3 +29,7 @@ dbt/.user.yml
 __pycache__/
 *.pyc
 .venv/
+
+# Local Airflow instance (airflow/start.sh) — metadata db, logs, generated
+# admin password, PID file. Not the DAGs themselves (airflow/dags/ stays).
+airflow/home/

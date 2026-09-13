@@ -435,11 +435,12 @@ aws ecs run-task \
 (subnets/security group: `terraform output` na pasta `infra/`, ou veja as
 variáveis `ECS_SUBNETS`/`ECS_SECURITY_GROUPS` do GitHub Environment.)
 
-**Opção D — a partir de uma instância própria do Airflow:** se você já tem
-Airflow rodando localmente (no seu Docker), `airflow/dags/dbt_lakehouse_dag.py`
+**Opção D — a partir do Airflow:** `airflow/dags/dbt_lakehouse_dag.py`
 dispara essa mesma task ECS via `EcsRunTaskOperator` — mesma imagem, mesma
-task definition, sem precisar instalar dbt/DuckDB dentro do Airflow. Setup
-completo em `airflow/README.md`.
+task definition, sem precisar instalar dbt/DuckDB dentro do Airflow. Use sua
+própria instância (se já tiver uma rodando), ou a instância local persistente
+já configurada em `airflow/` (`./start.sh`/`./stop.sh`, UI em
+`localhost:8080`, sem Docker). Setup completo em `airflow/README.md`.
 
 ### 5.4 Consultando o resultado
 
