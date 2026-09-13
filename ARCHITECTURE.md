@@ -141,6 +141,7 @@ Essa etapa é necessária pois o Terraform precisa de um state permanente por is
 | `profiles.yml` | Target `dev` (100% local, sem AWS) e `prod` (ECS, anexa o S3 Tables via `attach`/`secrets`) |
 | `dbt_project.yml` | Config condicional por target: materialização, `database`, `schema` |
 | `models/sources.yml` | Fontes bronze (`orders`, `clients`, `inventory` + `*_cdc`), lidas via `external_location` |
+| `models/silver/schema.yml` | Testes básicos (`unique`, `not_null`, `accepted_values`, `relationships`) — só têm efeito com `dbt build`/`dbt test`, não com `dbt run` (ver §3.20) |
 | `models/silver/stg_*.sql` | Transformações full-refresh (cast, normalização, filtro de PK) — baseline usado pela primeira carga dos models incrementais |
 | `models/silver/{orders,clients,inventory}.sql` | Incrementais: baseline de `stg_*` na primeira run, depois aplicam o lote CDC mais recente (`incremental_strategy='cdc_merge'`) — ver §6 |
 | `macros/generate_schema_name.sql` | Faz o schema resolver pra `silver` (não `main_silver`, que é o padrão do dbt) |
@@ -416,6 +417,27 @@ o próximo — um nível a mais no caminho, então não batem mais no glob raso
 `cdc/*.csv`. Assim o glob nunca vê mais de um lote de cada vez. Desabilite
 com `--keep-previous-batches` só se você quiser deliberadamente acumular
 lotes (não recomendado).
+
+### 3.20 `sources.yml`/`schema.yml` sem testes — teste `relationships` achou órfão nos dados de amostra
+
+**Contexto:** ao adicionar `dbt/models/silver/schema.yml` com testes
+básicos (`unique`, `not_null`, `accepted_values`, `relationships`), rodar
+`dbt build --target dev` **duas vezes seguidas** (o target `dev` usa um
+arquivo DuckDB persistente em `/tmp/dbt_dev.duckdb`, então a segunda run
+já é incremental e aplica `ingestion/sample_data/*_cdc.csv`) falhou nos
+testes `relationships` de `orders`.
+**Causa:** os CSVs de exemplo do CDC não preservavam integridade
+referencial entre si — `clients_cdc.csv` deleta o cliente `104` e
+`inventory_cdc.csv` deleta o produto `4`, mas `orders_cdc.csv` não tocava
+na order `4` (que referencia os dois), deixando-a órfã depois do merge.
+Não era um bug da estratégia de merge nem do dbt — os testes fizeram
+exatamente o que deveriam, achando uma inconsistência real nos dados de
+demonstração que antes passava despercebida por falta de teste.
+**Correção:** adicionada a linha `4,104,4,3,2026-01-06,44.25,cancelled,D`
+em `orders_cdc.csv`, deletando a order junto com o cliente/produto.
+Validado rodando `dbt build --target dev` três vezes seguidas (baseline,
+incremental, e reaplicação do mesmo lote) — 32/32 testes passando nos três
+casos.
 
 ---
 
