@@ -472,15 +472,34 @@ lendo o SQL):
    `Binder Error: table stg_inventory has 9 columns but 8 values were
    supplied`. **Correção:** `ingestion_time` adicionada também na branch
    incremental (com `current_timestamp`), igualando as duas a 9 colunas.
-   **Limitação conhecida, não corrigida:** como o merge faz
-   `UPDATE SET *` (todas as colunas da origem, sem exceção), uma linha que
-   sofre um `U` do CDC tem `ingestion_time` **sobrescrito** para a hora
-   atual — na prática, em qualquer linha já tocada por um update,
-   `ingestion_time` e `last_updated_time` acabam iguais, perdendo o
-   registro de quando a linha foi inserida originalmente. Corrigir de
-   verdade exigiria trocar o `UPDATE SET *` do macro por uma lista
-   explícita de colunas que preserva `ingestion_time` do lado do destino —
-   fora do escopo desta validação.
+   **Limitação adicional, corrigida depois (ver §3.22):** como o merge
+   fazia `UPDATE SET *` (todas as colunas da origem, sem exceção), uma
+   linha que sofria um `U` do CDC tinha `ingestion_time` sobrescrito para a
+   hora atual, perdendo o registro de quando a linha foi carregada pela
+   primeira vez.
+
+### 3.22 Preservar `ingestion_time` (auditoria de carga) através de updates do CDC
+
+**Objetivo:** `ingestion_time` deve registrar quando a linha entrou na
+tabela pela primeira vez, pra auditoria — diferente de `last_updated_time`,
+que deve refletir a última mudança. O `UPDATE SET *` do `cdc_merge`
+(§3.21) sobrescrevia as duas colunas igualmente em todo update,
+inutilizando essa distinção.
+**Correção:** o macro `duckdb__get_incremental_cdc_merge_sql` (ver §7)
+agora monta a lista de colunas do `UPDATE SET` explicitamente a partir de
+`args_dict['dest_columns']` (já fornecido pelo dbt-core), **excluindo**
+qualquer coluna listada na config do model
+`cdc_merge_preserve_on_update` — essas ficam de fora do `SET`, então o
+`MERGE INTO` mantém o valor já existente em `DBT_INTERNAL_DEST` em vez de
+trazer o da origem. `INSERT *` continua trazendo todas as colunas (linha
+nova, `ingestion_time` = agora, correto). Os três models
+(`stg_orders`/`stg_clients`/`stg_inventory`) declaram
+`cdc_merge_preserve_on_update=['ingestion_time']`.
+**Validado:** rodando baseline → incremental (update em order 1, insert de
+order 6) → reaplicação. `ingestion_time` do order 1 permaneceu no valor da
+carga original através das três rodadas; `last_updated_time` avançou a
+cada vez que a linha foi tocada; linhas nunca tocadas mantiveram os dois
+campos iguais desde a carga inicial.
 
 Revalidado de ponta a ponta (`dbt parse`, `dbt compile`, e `dbt build
 --target dev` três vezes seguidas — baseline, incremental, reaplicação)
@@ -674,3 +693,107 @@ enxerga só o lote mais recente na hora do `dbt build`, e basta rodar
 **Validado em escala real** contra o S3 Tables de produção: baseline
 (5M+100k+1M linhas) em ~21s, incremental (~125 mil mudanças contra a
 tabela de 5M linhas) em ~36s.
+
+---
+
+## 7. Macros (`dbt/macros/`)
+
+Três macros customizadas, cada uma resolvendo uma limitação específica do
+dbt-duckdb ou do DuckDB contra S3 Tables/Iceberg (todas com o bug/causa
+documentado em detalhe na seção 3).
+
+### 7.1 `generate_schema_name.sql` — nome do schema sem prefixo
+
+**O que é:** um *override* de uma macro padrão do dbt-core
+(`generate_schema_name`), que o dbt chama **automaticamente** sempre que
+resolve o schema de qualquer model — não precisa ser referenciada em
+lugar nenhum, o dbt encontra pelo nome exato.
+**Problema que resolve:** por padrão, quando um model define
+`+schema: "silver"` (como os models de `silver/` fazem, via
+`dbt_project.yml`), o dbt-core **concatena** com o schema do target
+(`{{ target.schema }}_silver`, ex.: `main_silver`) em vez de usar
+`silver` puro. O namespace real criado no S3 Tables pelo Terraform
+(`infra/s3tables.tf`) se chama `silver`, sem prefixo — ver §3.
+**Como funciona:** recebe `custom_schema_name` (o valor de `+schema`
+configurado no model) e `node` (o model sendo compilado). Se não há
+schema customizado, cai no padrão do target; se há, devolve **só** o
+nome customizado (`custom_schema_name | trim`), ignorando o prefixo que
+o dbt normalmente adicionaria.
+
+### 7.2 `materialization_iceberg_table.sql` — materialização `iceberg_table`
+
+**O que é:** uma materialização customizada nova (não um override) —
+fica disponível como `{{ config(materialized='iceberg_table') }}` em
+qualquer model, e é o default configurado em `dbt_project.yml` para a
+pasta `silver/` no target `prod` (`+materialized: "{{ 'iceberg_table' if
+target.name == 'prod' else 'table' }}"`).
+**Status atual:** nenhum model usa `iceberg_table` hoje — os três models
+de `silver/` (`stg_orders`/`stg_clients`/`stg_inventory`) fixam
+`materialized='incremental'` direto na própria config, que tem prioridade
+sobre o default da pasta. A materialização fica como *fallback* pronta
+pra qualquer model full-refresh que venha a ser adicionado em `silver/`
+(ou numa futura camada `gold/`) contra o target `prod`.
+**Problema que resolve (quando usada):** a materialização `table` padrão
+do dbt-duckdb cria uma tabela temporária e troca o nome por um `RENAME`
+atômico — o catálogo Iceberg do DuckDB não suporta `RENAME`
+(`Not implemented Error: Alter Schema Entry`, confirmado contra o bucket
+real).
+**Como funciona:** se já existe uma relação com esse nome, roda um
+`DROP TABLE IF EXISTS` direto (não usa `adapter.drop_relation()`, que
+emite `DROP ... CASCADE`, também não suportado no Iceberg) e dá um
+`adapter.commit()` explícito **antes** do `CREATE` — sem isso, a extensão
+Iceberg rejeita criar uma tabela com nome igual a uma apagada na mesma
+transação ainda aberta (`Cannot create table deleted within a
+transaction`). Depois roda um `CREATE TABLE ... AS` normal
+(`create_table_as`). Ou seja: drop-and-recreate completo a cada run, em
+vez do swap atômico que a materialização padrão faria.
+
+### 7.3 `incremental_strategy_cdc_merge.sql` — estratégia `cdc_merge`
+
+**O que é:** duas macros que juntas implementam uma *incremental
+strategy* customizada, usada via `{{ config(materialized='incremental',
+incremental_strategy='cdc_merge', unique_key=...) }}` nos três models de
+`silver/`.
+**Por que duas macros:** a materialização `incremental` do dbt-core
+resolve o nome da estratégia (`cdc_merge` → `get_incremental_cdc_merge_sql`)
+via `adapter.dispatch(...)`, e esse dispatch só encontra a macro se
+existir uma versão **sem prefixo** de adapter que ela mesma chame
+`adapter.dispatch(...)` de novo — é assim que as estratégias nativas do
+próprio dbt-core (`get_incremental_merge_sql`, etc.) são declaradas. Por
+isso:
+- `get_incremental_cdc_merge_sql(args_dict)` — só repassa pra
+  `adapter.dispatch('get_incremental_cdc_merge_sql')(args_dict)`. Sem
+  essa camada, o dbt erra com "could not find an incremental strategy
+  macro" mesmo com a implementação abaixo já existindo (ver §3.16).
+- `duckdb__get_incremental_cdc_merge_sql(args_dict)` — a implementação de
+  verdade, específica do adapter `duckdb` (prefixo `duckdb__` é a
+  convenção do dbt pra "isso vale só nesse adapter").
+
+**Como a implementação funciona**, passo a passo:
+1. Extrai do `args_dict` (montado pelo dbt-core): a relação alvo
+   (`target_relation`, ex. `silver.orders`), a relação temporária com o
+   lote compilado do model (`temp_relation`), a chave única
+   (`unique_key`) e as colunas da tabela alvo (`dest_columns`, já
+   calculadas pelo dbt-core via `adapter.get_columns_in_relation`).
+2. Lê a config opcional do model `cdc_merge_preserve_on_update` (lista de
+   nomes de coluna, default `[]`) e monta `update_columns` — todas as
+   colunas de `dest_columns` **exceto** essas.
+3. Statement 1 — `DELETE`: apaga do alvo toda linha cuja chave apareça na
+   origem com `_cdc_op = 'D'`.
+4. Statement 2 — `MERGE INTO`: casa o alvo com a origem (excluindo as
+   linhas `'D'`, já tratadas, e a própria coluna `_cdc_op`) pela
+   `unique_key`. Quando casa (`WHEN MATCHED`), roda um `UPDATE SET`
+   **explícito**, coluna por coluna, só com as de `update_columns` — as
+   listadas em `cdc_merge_preserve_on_update` (ex.: `ingestion_time`)
+   ficam de fora do `SET`, então o `MERGE` mantém o valor que já estava
+   no alvo em vez de trazer o da origem (ver §3.22). Quando não casa
+   (`WHEN NOT MATCHED`), roda `INSERT *` — traz todas as colunas da
+   origem, `ingestion_time` incluído (linha nova, valor correto).
+   Dois motivos pra ser dois statements e não um `MERGE` só com
+   `DELETE`+`UPDATE`: (a) o Iceberg do DuckDB só aceita uma ação de
+   UPDATE/DELETE por `MERGE` (§3.17); (b) mesmo sem essa limitação, duas
+   linhas de origem pra mesma chave dentro do mesmo lote de CDC dariam
+   resultado ambíguo (§3.19/§3.20) — o `DELETE` isolado evita essa
+   ambiguidade pro caso de delete. Os dois statements, separados por
+   `;`, rodam numa única chamada `execute()` do DuckDB — é assim que o
+   dbt-duckdb executa o SQL compilado de uma materialização.

@@ -15,7 +15,18 @@
 
   Use via `{{ config(materialized='incremental', incremental_strategy='cdc_merge', unique_key=...) }}`
   on a model whose compiled SELECT includes a `_cdc_op` column with values
-  'I'/'U'/'D' (see dbt/models/silver/{orders,clients,inventory}.sql).
+  'I'/'U'/'D' (see dbt/models/silver/stg_{orders,clients,inventory}.sql).
+
+  Optional model config `cdc_merge_preserve_on_update` (list of column
+  names, default []): columns to leave untouched by the UPDATE branch of
+  the merge, keeping the target's existing value instead of overwriting it
+  with the source's — for audit columns like `ingestion_time` that should
+  record when a row was first loaded, not the last time a CDC batch
+  touched it. Without this, `update set *` (the naive approach) overwrites
+  every column from the source on every update, including such audit
+  columns — confirmed empirically: after a row was updated, its
+  `ingestion_time` had been reset to the update's timestamp instead of
+  keeping the original insert time.
 #}
 {#
   dbt-core's incremental materialization looks up a strategy's SQL macro by
@@ -33,6 +44,13 @@
     {%- set target = args_dict['target_relation'] -%}
     {%- set source = args_dict['temp_relation'] -%}
     {%- set unique_key = args_dict['unique_key'] -%}
+    {%- set preserve_on_update = config.get('cdc_merge_preserve_on_update', []) -%}
+    {%- set update_columns = [] -%}
+    {%- for col in args_dict['dest_columns'] -%}
+        {%- if col.name not in preserve_on_update -%}
+            {%- do update_columns.append(col.name) -%}
+        {%- endif -%}
+    {%- endfor -%}
 
     delete from {{ target }}
     where {{ unique_key }} in (
@@ -43,7 +61,10 @@
     using (select * exclude (_cdc_op) from {{ source }} where _cdc_op != 'D') as DBT_INTERNAL_SOURCE
     on (DBT_INTERNAL_SOURCE.{{ unique_key }} = DBT_INTERNAL_DEST.{{ unique_key }})
     when matched then
-        update set *
+        update set
+            {%- for col_name in update_columns %}
+            {{ col_name }} = DBT_INTERNAL_SOURCE.{{ col_name }}{{ "," if not loop.last }}
+            {%- endfor %}
     when not matched then
         insert *;
 {% endmacro %}

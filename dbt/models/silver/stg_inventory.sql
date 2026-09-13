@@ -1,7 +1,8 @@
 {{ config(
     materialized='incremental',
     unique_key='product_id',
-    incremental_strategy='cdc_merge'
+    incremental_strategy='cdc_merge',
+    cdc_merge_preserve_on_update=['ingestion_time']
 ) }}
 
 {% if is_incremental() %}
