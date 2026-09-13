@@ -1,0 +1,4 @@
+product_id,warehouse_id,category,quantity_on_hand,unit_cost,last_restock_date,status,_cdc_op
+1,1,Electronics,80,199.90,2026-01-10,active,U
+4,3,Toys,50,14.75,2025-12-20,discontinued,D
+6,2,Home,150,89.00,2026-01-11,active,I

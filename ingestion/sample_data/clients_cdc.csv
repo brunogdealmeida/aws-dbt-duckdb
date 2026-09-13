@@ -1,0 +1,4 @@
+customer_id,name,email,country,signup_date,segment,_cdc_op
+102,Client 102,client102@example.com,US,2022-04-15,VIP,U
+104,Client 104,,AR,2023-06-20,VIP,D
+106,Client 106,client106@example.com,BR,2026-01-01,retail,I

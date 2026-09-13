@@ -1,0 +1,4 @@
+order_id,customer_id,product_id,quantity,order_date,amount,status,_cdc_op
+1,101,1,3,2026-01-08,599.70,Paid,U
+2,102,2,10,2026-01-05,45.00,paid,D
+6,105,3,2,2026-01-09,59.98,pending,I

@@ -3,7 +3,20 @@
 Este documento descreve a arquitetura completa do projeto, o que foi
 criado na AWS, os problemas encontrados ao subir a stack (e
 como foi resolvido), como renomear os recursos principais, e como rodar o
-pipeline local e na AWS.
+pipeline local e na AWS. 
+
+A escolha pelo Airflow no docker é devido aos custos envolvidos pra subir um MWAA ou um EC2 com RDS para rodar o Airflow self hosted, os demais recursos rodam na AWS para que a maior parte dos serviços seja na nuvem.
+
+Ferramentas utilizadas:
+
+ 1. AWS
+ 2. Airflow (Rodando no Docker)
+
+Acesso ao Airflow:
+
+- Rodar o docker dompose up -d na pasta airflow
+- Acessar a UI: http://localhost:8080
+- Utilizar o usuário e senha: airflow / airflow
 
 ---
 
@@ -23,13 +36,13 @@ ingestion/ingest_csv.py (ou generate_seed_data.py)
             |
             v
    dbt/models/silver/{orders,clients,inventory}.sql
-   (cast de tipos, normalização de texto, filtro de PK nula)
+   (cast de tipos, normalização de texto, filtro de chaves nulas)
             |
             v
    DuckDB ATTACH ... (TYPE iceberg, ENDPOINT_TYPE s3_tables)
             |
             v
-   S3 Tables — bucket dedicado, namespace `silver` (formato Iceberg)  <- camada silver
+   S3 Tables — bucket dedicado, database `silver` (formato Iceberg)  <- camada silver
             |
             v
    Federação Glue Data Catalog (s3tablescatalog) + Lake Formation
@@ -127,10 +140,12 @@ Essa etapa é necessária pois o Terraform precisa de um state permanente por is
 |---|---|
 | `profiles.yml` | Target `dev` (100% local, sem AWS) e `prod` (ECS, anexa o S3 Tables via `attach`/`secrets`) |
 | `dbt_project.yml` | Config condicional por target: materialização, `database`, `schema` |
-| `models/sources.yml` | Fontes bronze (`orders`, `clients`, `inventory`), lidas via `external_location` |
-| `models/silver/*.sql` | Transformações (cast, normalização, filtro de PK) |
+| `models/sources.yml` | Fontes bronze (`orders`, `clients`, `inventory` + `*_cdc`), lidas via `external_location` |
+| `models/silver/stg_*.sql` | Transformações full-refresh (cast, normalização, filtro de PK) — baseline usado pela primeira carga dos models incrementais |
+| `models/silver/{orders,clients,inventory}.sql` | Incrementais: baseline de `stg_*` na primeira run, depois aplicam o lote CDC mais recente (`incremental_strategy='cdc_merge'`) — ver §6 |
 | `macros/generate_schema_name.sql` | Faz o schema resolver pra `silver` (não `main_silver`, que é o padrão do dbt) |
 | `macros/materialization_iceberg_table.sql` | Materialização customizada pro target `prod` (ver §3.7) |
+| `macros/incremental_strategy_cdc_merge.sql` | Estratégia incremental customizada `cdc_merge` (DELETE + MERGE em dois statements — ver §3.17) |
 
 ### 2.4 Ingestão (`ingestion/`)
 
@@ -138,7 +153,9 @@ Essa etapa é necessária pois o Terraform precisa de um state permanente por is
 |---|---|
 | `ingest_csv.py` | Sobe CSVs locais pro landing bucket (`bronze/<source>/`) |
 | `generate_seed_data.py` | Gera dados de teste em volume real via DuckDB (orders=5M, clients=100k, inventory=1M linhas), com FKs íntegras |
+| `simulate_cdc.py` | Gera e sobe lotes de CDC (insert/update/delete) pra simular mudanças incrementais — ver §6 |
 | `sample_data/*.csv` | Amostras pequenas e FK-consistentes, usadas pelo target `dev`/CI |
+| `sample_data/*_cdc.csv` | Lotes de CDC de exemplo (mão), usados pelo target `dev`/CI pros models incrementais |
 
 ### 2.5 CI/CD (`.github/workflows/`)
 
@@ -320,6 +337,86 @@ porque o `deploy.yml` registra novas revisões *fora* do Terraform
 número de revisão (`.../task-definition/<family>`, sem `:N`), fazendo o
 ECS sempre resolver pra última revisão ATIVA automaticamente.
 
+### 3.16 dbt não encontra a estratégia incremental customizada `cdc_merge`
+
+**Sintoma:** `Compilation Error: dbt could not find an incremental
+strategy macro with the name 'get_incremental_cdc_merge_sql' in
+aws_lakehouse` — mesmo com a macro `duckdb__get_incremental_cdc_merge_sql`
+já implementada e nomeada certo.
+**Causa:** `adapter.get_incremental_strategy_macro()` resolve o nome
+**sem prefixo** (`get_incremental_cdc_merge_sql`) via
+`adapter.dispatch(...)`, do mesmo jeito que as estratégias nativas do dbt
+(`get_incremental_merge_sql`, etc.) são declaradas — só ter a versão
+prefixada com `duckdb__` não é suficiente, o dispatcher plain precisa
+existir.
+**Correção:** adicionar a macro pública (sem prefixo) que só chama
+`adapter.dispatch('get_incremental_cdc_merge_sql')(args_dict)`, igual ao
+padrão usado pelas estratégias built-in do dbt-core (ver
+`dbt/macros/incremental_strategy_cdc_merge.sql`).
+
+### 3.17 `MERGE INTO` do DuckDB em tabela Iceberg só aceita uma ação (UPDATE ou DELETE)
+
+**Sintoma:** `Not implemented Error: MERGE INTO with Iceberg only supports
+a single UPDATE/DELETE action currently` — ao rodar a estratégia `merge`
+nativa do dbt-duckdb (que gera um único `MERGE INTO` com `WHEN MATCHED AND
+... THEN DELETE` e `WHEN MATCHED THEN UPDATE` no mesmo statement).
+**Causa:** limitação real da extensão Iceberg do DuckDB 1.5.5 — descoberta
+testando direto contra o bucket S3 Tables real, não documentada
+previamente. Um `MERGE INTO` visando uma tabela Iceberg aceita **no
+máximo uma** ação de UPDATE/DELETE.
+**Correção:** estratégia customizada `cdc_merge` em dois statements —
+(1) `DELETE FROM target WHERE pk IN (SELECT pk FROM lote WHERE
+_cdc_op='D')`, depois (2) um `MERGE INTO` só com `WHEN MATCHED THEN UPDATE
+SET *` / `WHEN NOT MATCHED THEN INSERT *` (sem cláusula de delete).
+Confirmado que os dois statements, separados por `;`, rodam certinho numa
+única chamada `execute()` — que é como o dbt-duckdb executa o SQL
+compilado de uma materialização.
+
+### 3.18 `simulate_cdc.py` gerava linhas marcadas como 'U' **e** 'D' ao mesmo tempo
+
+**Sintoma:** depois de aplicar um lote de CDC em escala real (5M+ linhas),
+a contagem final ficou **maior** que o esperado (`5.000.303` em vez de
+`4.999.759` em `orders`, e o mesmo padrão em `clients`/`inventory`) —
+descoberto comparando a aritmética esperada (baseline − deletes +
+inserts) com o resultado real via Athena, não assumido como correto só
+porque o `dbt build` reportou sucesso.
+**Causa:** o script sorteava as linhas de update e de delete com duas
+chamadas `USING SAMPLE X% (bernoulli)` **independentes** sobre a mesma
+tabela base — como cada sorteio é independente, uma linha podia cair nos
+dois grupos ao mesmo tempo (mesma PK marcada `'U'` e `'D'` no mesmo lote).
+A estratégia `cdc_merge` (§3.17) processa o `DELETE` primeiro e o
+`MERGE`/`INSERT` depois: a cópia `'D'` deletava a linha, e a cópia `'U'`
+da mesma PK, não encontrando mais correspondência, caía no `WHEN NOT
+MATCHED THEN INSERT` — reinserindo (com os valores "atualizados") uma
+linha que deveria ter sido removida. Bug do script de simulação, não da
+estratégia de merge, dos models, nem do `MERGE`/`DELETE` do DuckDB
+(validados isoladamente com dados sem sobreposição antes disso).
+**Correção:** sortear **um único** valor aleatório por linha (`random()
+AS _r` numa CTE) e particionar update/delete a partir desse mesmo valor
+(`_r < delete_pct` vs. `delete_pct <= _r < delete_pct+update_pct`), em vez
+de duas amostragens independentes — garante que update e delete são
+mutuamente exclusivos dentro do mesmo lote.
+
+### 3.19 Reaplicar vários lotes de CDC acumulados dá resultado ambíguo
+
+**Sintoma (encontrado testando, antes de virar bug em produção):** a fonte
+`bronze/<entidade>/cdc/*.csv` é um `glob` achatado — cada `dbt build` lê
+**todo** arquivo já subido naquele prefixo, não só os novos. Se a mesma PK
+aparece em dois lotes históricos diferentes (ex.: atualizada de novo numa
+rodada seguinte), o `MERGE INTO` do DuckDB recebe duas linhas de origem
+pra uma mesma linha de destino.
+**Causa:** confirmado com um `MERGE INTO` isolado (fora do dbt) com duas
+linhas de origem pra mesma chave — DuckDB **não** rejeita nem avisa,
+resolve o conflito escolhendo uma das duas silenciosamente (a primeira, no
+teste; não necessariamente a mais recente), o que corrompe o resultado de
+forma sutil ao simular várias rodadas de mudança.
+**Correção:** `simulate_cdc.py` agora arquiva (`copy_object` + `delete_object`)
+os lotes já subidos pra `bronze/<entidade>/cdc/applied/` antes de escrever
+o próximo — um nível a mais no caminho, então não batem mais no glob raso
+`cdc/*.csv`. Assim o glob nunca vê mais de um lote de cada vez. Desabilite
+com `--keep-previous-batches` só se você quiser deliberadamente acumular
+lotes (não recomendado).
+
 ---
 
 ## 4. Como renomear buckets / namespace / catálogo do Athena
@@ -468,3 +565,42 @@ aws athena start-query-execution \
 ```
 Ou, no console do Athena, selecione `datalab-duckdb` no dropdown de "Data
 source" antes de consultar.
+
+---
+
+## 6. Simulando CDC (updates/deletes incrementais)
+
+Os models `dbt/models/silver/{orders,clients,inventory}.sql` são
+**incrementais de verdade**: a primeira run materializa a tabela inteira a
+partir de `stg_*` (full refresh); toda run seguinte lê o(s) lote(s) de CDC
+mais recente(s) — linhas marcadas com uma coluna `_cdc_op` (`I`
+insert/`U`update/`D`delete) — e aplica só a mudança, via a estratégia
+customizada `cdc_merge` (§3.17/§3.16).
+
+**Gerando um lote de CDC** (requer os full-loads já gerados por
+`generate_seed_data.py`):
+```bash
+python ingestion/simulate_cdc.py --entity all
+# ou, uma entidade por vez, com percentuais customizados:
+python ingestion/simulate_cdc.py --entity orders --update-pct 5 --delete-pct 1 --insert-pct 1
+```
+Escreve `ingestion/seed_data/bronze/<entidade>/cdc/<timestamp>.csv` e sobe
+pro `LANDING_BUCKET` (env var) em `bronze/<entidade>/cdc/`. `--no-upload`
+só grava local. O estado (próximo ID livre de cada entidade, pra novos
+inserts não colidirem com PKs existentes) fica em
+`ingestion/seed_data/.cdc_state.json` — não commitado, cresce a cada run.
+
+**Aplicando o lote:**
+```bash
+dbt build --target prod --select orders clients inventory
+```
+Roda a materialização incremental, que faz `glob` em
+`bronze/<entidade>/cdc/*.csv`. Esse glob é achatado (só um nível) — por
+isso o `simulate_cdc.py` arquiva os lotes já subidos em
+`cdc/applied/` antes de subir o próximo (ver §3.19): assim o glob sempre
+enxerga só o lote mais recente na hora do `dbt build`, e basta rodar
+`simulate_cdc.py` de novo pra simular uma nova rodada de mudanças.
+
+**Validado em escala real** contra o S3 Tables de produção: baseline
+(5M+100k+1M linhas) em ~21s, incremental (~125 mil mudanças contra a
+tabela de 5M linhas) em ~36s.
