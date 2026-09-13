@@ -1,0 +1,169 @@
+# Trimmed down from the official Airflow 3.0.3 docker-compose.yaml
+# (https://airflow.apache.org/docs/apache-airflow/3.0.3/docker-compose.yaml):
+# LocalExecutor instead of CeleryExecutor, so no Redis/celery-worker/flower —
+# this project only ever runs one task at a time (see airflow/README.md §C).
+#
+# Runs on real Linux inside Docker, unlike the plain-venv option in this
+# folder (§B) — sidesteps a macOS-specific bug where Airflow's LocalExecutor
+# hangs resolving DNS in forked task processes (documented in the "Local
+# Airflow — debugging notes" section of airflow/README.md).
+#
+#   docker compose up airflow-init   # first time only: db migrate + create admin user
+#   docker compose up -d             # start everything
+#   docker compose down              # stop (add -v to also wipe the metadata db)
+#
+# UI: http://localhost:8080 — user/password: airflow/airflow (default; see
+# _AIRFLOW_WWW_USER_USERNAME/_AIRFLOW_WWW_USER_PASSWORD below to change it).
+
+x-airflow-common:
+  &airflow-common
+  image: ${AIRFLOW_IMAGE_NAME:-apache/airflow:3.0.3}
+  environment:
+    &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__CORE__AUTH_MANAGER: airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+    AIRFLOW__CORE__FERNET_KEY: ''
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+    AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+    AIRFLOW__CORE__EXECUTION_API_SERVER_URL: 'http://airflow-apiserver:8080/execution/'
+    AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: 'true'
+    # Without a fixed shared secret, each service (scheduler, api-server, ...)
+    # generates its own random JWT key at startup, so the scheduler-signed
+    # task auth token fails api-server's signature check ("Invalid auth
+    # token: Signature verification failed") — a known Airflow 3.0.x gap
+    # (apache/airflow#59373). Fine as a static dev value; rotate per
+    # environment for anything long-lived.
+    AIRFLOW__API_AUTH__JWT_SECRET: ${_AIRFLOW_JWT_SECRET:-11439f3f63990da14bafa413fc1d9db45e7c321be4ed8086aaae9703ea83c03e}
+    # Dev-only convenience (see the upstream file's own warning about this).
+    # Pulls in the operator the DAG needs (EcsRunTaskOperator).
+    _PIP_ADDITIONAL_REQUIREMENTS: ${_PIP_ADDITIONAL_REQUIREMENTS:-apache-airflow-providers-amazon}
+    AIRFLOW_CONFIG: '/opt/airflow/config/airflow.cfg'
+    # boto3's default credential chain picks this up (same identity as
+    # `aws sts get-caller-identity` on the host, e.g. terraform-admin) — see
+    # AWS_CONN_ID = None in dags/dbt_lakehouse_dag.py.
+    AWS_SHARED_CREDENTIALS_FILE: /home/airflow/.aws/credentials
+    AWS_CONFIG_FILE: /home/airflow/.aws/config
+  volumes:
+    - ${AIRFLOW_PROJ_DIR:-.}/dags:/opt/airflow/dags
+    - ${AIRFLOW_PROJ_DIR:-.}/docker-logs:/opt/airflow/logs
+    - ${AIRFLOW_PROJ_DIR:-.}/docker-plugins:/opt/airflow/plugins
+    - ~/.aws:/home/airflow/.aws:ro
+  user: "${AIRFLOW_UID:-50000}:0"
+  depends_on:
+    &airflow-common-depends-on
+    postgres:
+      condition: service_healthy
+
+services:
+  postgres:
+    image: postgres:13
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - postgres-db-volume:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 10s
+      retries: 5
+      start_period: 5s
+    restart: always
+
+  airflow-apiserver:
+    <<: *airflow-common
+    command: api-server
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/api/v2/version"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8974/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-dag-processor:
+    <<: *airflow-common
+    command: dag-processor
+    healthcheck:
+      test: ["CMD-SHELL", 'airflow jobs check --job-type DagProcessorJob --hostname "$${HOSTNAME}"']
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-triggerer:
+    <<: *airflow-common
+    command: triggerer
+    healthcheck:
+      test: ["CMD-SHELL", 'airflow jobs check --job-type TriggererJob --hostname "$${HOSTNAME}"']
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-init:
+    <<: *airflow-common
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        mkdir -v -p /opt/airflow/{logs,dags,plugins,config}
+        chown -R "${AIRFLOW_UID:-50000}:0" /opt/airflow/{logs,dags,plugins,config}
+        exec /entrypoint airflow version
+    environment:
+      <<: *airflow-common-env
+      _AIRFLOW_DB_MIGRATE: 'true'
+      _AIRFLOW_WWW_USER_CREATE: 'true'
+      _AIRFLOW_WWW_USER_USERNAME: ${_AIRFLOW_WWW_USER_USERNAME:-airflow}
+      _AIRFLOW_WWW_USER_PASSWORD: ${_AIRFLOW_WWW_USER_PASSWORD:-airflow}
+      _PIP_ADDITIONAL_REQUIREMENTS: ''
+    user: "0:0"
+
+  airflow-cli:
+    <<: *airflow-common
+    profiles:
+      - debug
+    environment:
+      <<: *airflow-common-env
+      CONNECTION_CHECK_MAX_COUNT: "0"
+    command:
+      - bash
+      - -c
+      - airflow
+    depends_on:
+      <<: *airflow-common-depends-on
+
+volumes:
+  postgres-db-volume:

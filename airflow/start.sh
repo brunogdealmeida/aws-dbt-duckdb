@@ -11,6 +11,22 @@ cd "$(dirname "${BASH_SOURCE[0]}")"
 
 export AIRFLOW_HOME="$(pwd)/home"
 export AIRFLOW__CORE__DAGS_FOLDER="$(pwd)/dags"
+
+# Without this, boto3/urllib3 calls macOS's SCDynamicStoreCopyProxiesWithOptions
+# (system proxy auto-detection) before every HTTP request. LocalExecutor task
+# workers are forked processes, and that CoreFoundation call isn't fork-safe on
+# macOS — it hangs indefinitely (spinning on signal handling, 100% CPU, no
+# network activity) instead of erroring. Confirmed by stack-sampling a stuck
+# `dbt_build` task with `sample <pid>`. Setting NO_PROXY skips the lookup.
+export NO_PROXY="*"
+export no_proxy="*"
+# Belt-and-suspenders for the same fork-safety class of issue: makes the
+# Objective-C runtime tolerate being touched after fork() instead of
+# aborting/hanging. Standard macOS workaround for this bug class (also
+# needed by e.g. matplotlib/TensorFlow under multiprocessing on macOS).
+export OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES
+export AIRFLOW__CORE__MP_START_METHOD=spawn
+
 PID_FILE="$AIRFLOW_HOME/standalone.pid"
 LOG_FILE="$AIRFLOW_HOME/standalone.log"
 

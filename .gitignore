@@ -33,3 +33,9 @@ __pycache__/
 # Local Airflow instance (airflow/start.sh) — metadata db, logs, generated
 # admin password, PID file. Not the DAGs themselves (airflow/dags/ stays).
 airflow/home/
+
+# Local Airflow-in-Docker (airflow/docker-compose.yaml) — bind-mounted logs/
+# plugins and the .env (just AIRFLOW_UID, but treated as local config).
+airflow/docker-logs/
+airflow/docker-plugins/
+airflow/.env

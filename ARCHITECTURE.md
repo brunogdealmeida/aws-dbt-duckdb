@@ -437,10 +437,14 @@ variáveis `ECS_SUBNETS`/`ECS_SECURITY_GROUPS` do GitHub Environment.)
 
 **Opção D — a partir do Airflow:** `airflow/dags/dbt_lakehouse_dag.py`
 dispara essa mesma task ECS via `EcsRunTaskOperator` — mesma imagem, mesma
-task definition, sem precisar instalar dbt/DuckDB dentro do Airflow. Use sua
-própria instância (se já tiver uma rodando), ou a instância local persistente
-já configurada em `airflow/` (`./start.sh`/`./stop.sh`, UI em
-`localhost:8080`, sem Docker). Setup completo em `airflow/README.md`.
+task definition, sem precisar instalar dbt/DuckDB dentro do Airflow. Três
+jeitos de rodar (detalhes em `airflow/README.md`): sua própria instância; um
+Airflow completo em Docker já configurado em `airflow/`
+(`docker compose up -d`, **recomendado no macOS** — validado de ponta a
+ponta); ou uma instância local em `venv` sem Docker (`./start.sh`/
+`./stop.sh`) — essa última esbarra num bug real do `LocalExecutor` do
+Airflow no macOS (trava resolvendo DNS ao despachar a task de verdade,
+mesmo sem estar em Docker) documentado em `airflow/README.md`.
 
 ### 5.4 Consultando o resultado
 
