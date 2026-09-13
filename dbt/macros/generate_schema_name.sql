@@ -1,5 +1,4 @@
-{#
-  dbt's default generate_schema_name macro prefixes a custom schema with the
+{# dbts default generate_schema_name macro prefixes a custom schema with the
   target's default schema (e.g. "main_silver"), which doesn't match the S3
   Tables namespace Terraform actually creates ("silver" — see
   infra/s3tables.tf). Use the custom schema as-is instead.

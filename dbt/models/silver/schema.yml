@@ -2,7 +2,13 @@ version: 2
 
 models:
   - name: stg_orders
-    description: Full-refresh cleaned orders (cast types, normalized status, PK filter).
+    description: >
+      Incremental orders — baseline (cast types, normalized status, PK
+      filter) from bronze.orders on first run, CDC batches (insert/update/
+      delete) applied on every run after (see
+      macros/incremental_strategy_cdc_merge.sql). The unique/not_null tests
+      here are the ones that would have caught the merge-ambiguity bugs
+      documented in ARCHITECTURE.md §3.18/§3.19.
     columns:
       - name: order_id
         data_tests:
@@ -33,7 +39,9 @@ models:
                 values: ['paid', 'pending', 'cancelled', 'refunded']
 
   - name: stg_clients
-    description: Full-refresh cleaned clients (cast types, normalized segment, PK filter).
+    description: >
+      Incremental clients — baseline from bronze.clients on first run, CDC
+      batches applied after.
     columns:
       - name: customer_id
         data_tests:
@@ -49,7 +57,9 @@ models:
                 values: ['retail', 'wholesale', 'vip']
 
   - name: stg_inventory
-    description: Full-refresh cleaned inventory (cast types, normalized status, PK filter).
+    description: >
+      Incremental inventory — baseline from bronze.inventory on first run,
+      CDC batches applied after.
     columns:
       - name: product_id
         data_tests:
@@ -57,62 +67,6 @@ models:
           - not_null
       - name: warehouse_id
         data_tests:
-          - not_null
-      - name: status
-        data_tests:
-          - accepted_values:
-              arguments:
-                values: ['active', 'discontinued']
-
-  - name: orders
-    description: >
-      Incremental orders — baseline from stg_orders on first run, CDC
-      batches (insert/update/delete) applied on every run after (see
-      macros/incremental_strategy_cdc_merge.sql). The unique/not_null tests
-      here are the ones that would have caught the merge-ambiguity bugs
-      documented in ARCHITECTURE.md §3.18/§3.19.
-    columns:
-      - name: order_id
-        data_tests:
-          - unique
-          - not_null
-      - name: customer_id
-        data_tests:
-          - relationships:
-              arguments:
-                to: ref('clients')
-                field: customer_id
-      - name: product_id
-        data_tests:
-          - relationships:
-              arguments:
-                to: ref('inventory')
-                field: product_id
-      - name: status
-        data_tests:
-          - accepted_values:
-              arguments:
-                values: ['paid', 'pending', 'cancelled', 'refunded']
-
-  - name: clients
-    description: Incremental clients — baseline from stg_clients, then CDC batches applied.
-    columns:
-      - name: customer_id
-        data_tests:
-          - unique
-          - not_null
-      - name: segment
-        data_tests:
-          - accepted_values:
-              arguments:
-                values: ['retail', 'wholesale', 'vip']
-
-  - name: inventory
-    description: Incremental inventory — baseline from stg_inventory, then CDC batches applied.
-    columns:
-      - name: product_id
-        data_tests:
-          - unique
           - not_null
       - name: status
         data_tests:

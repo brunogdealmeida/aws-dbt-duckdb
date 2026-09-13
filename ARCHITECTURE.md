@@ -35,8 +35,9 @@ ingestion/ingest_csv.py (ou generate_seed_data.py)
    (lido via httpfs do DuckDB, sem catálogo — direto do S3)
             |
             v
-   dbt/models/silver/{orders,clients,inventory}.sql
-   (cast de tipos, normalização de texto, filtro de chaves nulas)
+   dbt/models/silver/stg_{orders,clients,inventory}.sql
+   (cast de tipos, normalização de texto, filtro de chaves nulas — e,
+    a partir da 2a run, merge do lote CDC mais recente)
             |
             v
    DuckDB ATTACH ... (TYPE iceberg, ENDPOINT_TYPE s3_tables)
@@ -142,8 +143,7 @@ Essa etapa é necessária pois o Terraform precisa de um state permanente por is
 | `dbt_project.yml` | Config condicional por target: materialização, `database`, `schema` |
 | `models/sources.yml` | Fontes bronze (`orders`, `clients`, `inventory` + `*_cdc`), lidas via `external_location` |
 | `models/silver/schema.yml` | Testes básicos (`unique`, `not_null`, `accepted_values`, `relationships`) — só têm efeito com `dbt build`/`dbt test`, não com `dbt run` (ver §3.20) |
-| `models/silver/stg_*.sql` | Transformações full-refresh (cast, normalização, filtro de PK) — baseline usado pela primeira carga dos models incrementais |
-| `models/silver/{orders,clients,inventory}.sql` | Incrementais: baseline de `stg_*` na primeira run, depois aplicam o lote CDC mais recente (`incremental_strategy='cdc_merge'`) — ver §6 |
+| `models/silver/stg_{orders,clients,inventory}.sql` | Incrementais: baseline (cast, normalização, filtro de PK) direto de `bronze.<entidade>` na primeira run, depois aplicam o lote CDC mais recente de `bronze.<entidade>_cdc` (`incremental_strategy='cdc_merge'`) — ver §6 |
 | `macros/generate_schema_name.sql` | Faz o schema resolver pra `silver` (não `main_silver`, que é o padrão do dbt) |
 | `macros/materialization_iceberg_table.sql` | Materialização customizada pro target `prod` (ver §3.7) |
 | `macros/incremental_strategy_cdc_merge.sql` | Estratégia incremental customizada `cdc_merge` (DELETE + MERGE em dois statements — ver §3.17) |
@@ -439,6 +439,53 @@ Validado rodando `dbt build --target dev` três vezes seguidas (baseline,
 incremental, e reaplicação do mesmo lote) — 32/32 testes passando nos três
 casos.
 
+### 3.21 Consolidação de `stg_*.sql` + `{orders,clients,inventory}.sql` num só model (três bugs)
+
+**Contexto:** os três models full-refresh (`stg_orders`/`stg_clients`/
+`stg_inventory`) e os três incrementais (`orders`/`clients`/`inventory`)
+foram consolidados num único arquivo por entidade — `stg_*.sql` passou a
+ser, ele mesmo, o model incremental (baseline na primeira run, CDC depois),
+e os três arquivos separados foram apagados. A mudança expôs três bugs,
+achados rodando `dbt compile`/`dbt build --target dev` de verdade (não só
+lendo o SQL):
+
+1. **Ciclo de dependência.** A branch `{% else %}` (baseline) de cada
+   model referenciava **a si mesma** (`from {{ ref('stg_orders') }}`
+   dentro do próprio `stg_orders.sql`) — sobrou do formato antigo, em que
+   o model incremental lia o `stg_*` separado. `dbt compile` falha com
+   `Found a cycle: model.aws_lakehouse.stg_orders`. **Correção:** a branch
+   baseline agora lê direto de `{{ source('bronze', '<entidade>') }}`
+   (a fonte raw, sem CDC), com o mesmo cast/normalização que antes vivia
+   no `stg_*` separado.
+2. **`current_timestamp()` não existe no DuckDB.** As duas colunas de
+   metadata adicionadas (`ingestion_time`, `last_updated_time`) usavam
+   `current_timestamp()` com parênteses — DuckDB trata `current_timestamp`
+   como palavra-chave niládica, não função escalar:
+   `Catalog Error: Scalar Function with name current_timestamp does not
+   exist! Did you mean "current_localtimestamp"?`. **Correção:** removidos
+   os parênteses (`current_timestamp`, sem `()`) nas seis ocorrências.
+3. **Contagem de colunas diferente entre as duas branches quebra o
+   `INSERT *`/`UPDATE SET *` do `cdc_merge`.** A branch baseline ganhou
+   uma coluna extra (`ingestion_time`) que a branch incremental não tinha
+   — o `WHEN NOT MATCHED THEN INSERT *` do merge (§3.17) exige que a
+   sub-query de origem tenha o mesmo número de colunas da tabela alvo:
+   `Binder Error: table stg_inventory has 9 columns but 8 values were
+   supplied`. **Correção:** `ingestion_time` adicionada também na branch
+   incremental (com `current_timestamp`), igualando as duas a 9 colunas.
+   **Limitação conhecida, não corrigida:** como o merge faz
+   `UPDATE SET *` (todas as colunas da origem, sem exceção), uma linha que
+   sofre um `U` do CDC tem `ingestion_time` **sobrescrito** para a hora
+   atual — na prática, em qualquer linha já tocada por um update,
+   `ingestion_time` e `last_updated_time` acabam iguais, perdendo o
+   registro de quando a linha foi inserida originalmente. Corrigir de
+   verdade exigiria trocar o `UPDATE SET *` do macro por uma lista
+   explícita de colunas que preserva `ingestion_time` do lado do destino —
+   fora do escopo desta validação.
+
+Revalidado de ponta a ponta (`dbt parse`, `dbt compile`, e `dbt build
+--target dev` três vezes seguidas — baseline, incremental, reaplicação)
+depois das três correções, sem erros nem warnings.
+
 ---
 
 ## 4. Como renomear buckets / namespace / catálogo do Athena
@@ -592,12 +639,13 @@ source" antes de consultar.
 
 ## 6. Simulando CDC (updates/deletes incrementais)
 
-Os models `dbt/models/silver/{orders,clients,inventory}.sql` são
-**incrementais de verdade**: a primeira run materializa a tabela inteira a
-partir de `stg_*` (full refresh); toda run seguinte lê o(s) lote(s) de CDC
-mais recente(s) — linhas marcadas com uma coluna `_cdc_op` (`I`
-insert/`U`update/`D`delete) — e aplica só a mudança, via a estratégia
-customizada `cdc_merge` (§3.17/§3.16).
+Os models `dbt/models/silver/stg_{orders,clients,inventory}.sql` são
+**incrementais de verdade**: a primeira run materializa a tabela inteira
+direto de `bronze.<entidade>` (cast, normalização, filtro de PK); toda run
+seguinte lê o(s) lote(s) de CDC mais recente(s) de `bronze.<entidade>_cdc`
+— linhas marcadas com uma coluna `_cdc_op` (`I` insert/`U` update/`D`
+delete) — e aplica só a mudança, via a estratégia customizada `cdc_merge`
+(§3.17/§3.16).
 
 **Gerando um lote de CDC** (requer os full-loads já gerados por
 `generate_seed_data.py`):
