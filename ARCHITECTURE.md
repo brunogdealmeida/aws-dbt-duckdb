@@ -22,7 +22,7 @@ ingestion/ingest_csv.py (ou generate_seed_data.py)
    (lido via httpfs do DuckDB, sem catálogo — direto do S3)
             |
             v
-   dbt/models/silver/{stg_orders,stg_clients,stg_inventory}.sql
+   dbt/models/silver/{orders,clients,inventory}.sql
    (cast de tipos, normalização de texto, filtro de PK nula)
             |
             v
@@ -42,9 +42,9 @@ As três entidades da camada silver têm integridade referencial de verdade pra 
 gold:
 
 ```text
-stg_orders.customer_id -> stg_clients.customer_id
-stg_orders.product_id  -> stg_inventory.product_id
-stg_orders.amount        é derivado de stg_inventory.unit_cost * quantity (com ruído)
+orders.customer_id -> clients.customer_id
+orders.product_id  -> inventory.product_id
+orders.amount        é derivado de inventory.unit_cost * quantity (com ruído)
 ```
 
 ### 1.2 Execução / orquestração
@@ -93,6 +93,15 @@ rodando 24/7 (ver §5 sobre por que não usamos Airflow/MWAA aqui).
 
 Aplicado uma única vez, manualmente, com state local (resolve o problema de
 "a config não pode referenciar o próprio backend que ela cria"):
+
+Comandos executados pra criar essa etapa: 
+
+cd /Users/brunogdealmeida/Documents/Projetos/aws-dbt-duckdb/infra/bootstrap && terraform apply -auto-approve
+  -var="state_bucket_name=aws-dbt-duckdb-tfstate-770724966330"
+
+Se pedir um Value como parametro coloque: state_bucket_name=aws-dbt-duckdb-tfstate-770724966330
+
+Essa etapa é necessária pois o Terraform precisa de um state permanente por isso ele precisa de um bucket pra armazenar e usar como memória persistente e o dynamodb fica responsável pelo state locking (acho que nas versões mais recentes o S3 faz o locking, mas eu ainda não me aprofundei nisso e vou deixar pra outra etapa)
 
 | Recurso | Propósito |
 |---|---|
@@ -311,32 +320,6 @@ porque o `deploy.yml` registra novas revisões *fora* do Terraform
 número de revisão (`.../task-definition/<family>`, sem `:N`), fazendo o
 ECS sempre resolver pra última revisão ATIVA automaticamente.
 
-### 3.16 `S3_TABLE_BUCKET` errado na task definition, escondido havia semanas
-
-**Sintoma:** a primeira execução real do `dbt-build` via `aws ecs run-task`
-depois de configurar o upload de logs (§6) falhou com
-`Request to 's3tables.us-east-1.amazonaws.com/.../config?warehouse=...
-bucket%2Faws-dbt-duckdb-tables-770724966330' ... NotFound_404` — note o
-`aws-` no nome do bucket.
-**Causa:** exatamente o mecanismo descrito em §6.3, mas dessa vez causando
-um bug de verdade, não só um risco: a task definition foi criada pela
-**primeira vez** (bootstrap) quando `s3_tables_bucket_name` no
-`terraform.tfvars` ainda tinha o nome antigo (com `aws-`, antes da correção
-do item 3.4). O bucket em si foi corrigido depois, mas o valor do
-`S3_TABLE_BUCKET` ficou **congelado** na task definition por causa do
-`ignore_changes` — nenhum dos `terraform apply` seguintes corrigiu isso, e
-nenhum deploy via `deploy.yml` também (ele só troca a imagem). Passou
-despercebido porque todo teste anterior contra o `prod` target rodou
-localmente com as variáveis de ambiente setadas manualmente no terminal,
-nunca lendo o valor real gravado na task definition do ECS.
-**Correção:** registrada uma nova revisão (13) com `S3_TABLE_BUCKET`
-corrigido, usando o mesmo processo do §6.3.
-**Lição:** depois de qualquer rename de recurso referenciado por env var da
-task (bucket, namespace...), **sempre** conferir o valor real via
-`aws ecs describe-task-definition ... --query
-"taskDefinition.containerDefinitions[0].environment"` — não basta o
-`terraform apply` "não dar erro".
-
 ---
 
 ## 4. Como renomear buckets / namespace / catálogo do Athena
@@ -426,7 +409,7 @@ dbt build --target prod
 ```
 
 Para rodar só um model específico (útil pra não esperar os 5M de linhas do
-`stg_orders` toda vez): `dbt build --target prod --select stg_clients stg_inventory`.
+`orders` toda vez): `dbt build --target prod --select clients inventory`.
 
 ### 5.3 Na AWS, via ECS (produção)
 
@@ -452,6 +435,12 @@ aws ecs run-task \
 (subnets/security group: `terraform output` na pasta `infra/`, ou veja as
 variáveis `ECS_SUBNETS`/`ECS_SECURITY_GROUPS` do GitHub Environment.)
 
+**Opção D — a partir de uma instância própria do Airflow:** se você já tem
+Airflow rodando localmente (no seu Docker), `airflow/dags/dbt_lakehouse_dag.py`
+dispara essa mesma task ECS via `EcsRunTaskOperator` — mesma imagem, mesma
+task definition, sem precisar instalar dbt/DuckDB dentro do Airflow. Setup
+completo em `airflow/README.md`.
+
 ### 5.4 Consultando o resultado
 
 **Via DuckDB direto** (funciona igual ao que o `prod` target faz):
@@ -462,142 +451,15 @@ con.execute("INSTALL httpfs; INSTALL aws; INSTALL iceberg; LOAD httpfs; LOAD aws
 con.execute("CREATE SECRET s3_tables_secret (TYPE s3, PROVIDER credential_chain, REGION 'us-east-1');")
 con.execute("ATTACH IF NOT EXISTS 'arn:aws:s3tables:us-east-1:770724966330:bucket/dbt-duckdb-tables-770724966330' "
             "AS s3_tables (TYPE iceberg, ENDPOINT_TYPE s3_tables, SECRET s3_tables_secret);")
-con.execute("SELECT * FROM s3_tables.silver.stg_orders LIMIT 10").fetchall()
+con.execute("SELECT * FROM s3_tables.silver.orders LIMIT 10").fetchall()
 ```
 
 **Via Athena:**
 ```bash
 aws athena start-query-execution \
-  --query-string "SELECT * FROM silver.stg_orders LIMIT 10" \
+  --query-string "SELECT * FROM silver.orders LIMIT 10" \
   --work-group aws-duckdb-lakehouse-dev \
   --query-execution-context Catalog=datalab-duckdb
 ```
 Ou, no console do Athena, selecione `datalab-duckdb` no dropdown de "Data
 source" antes de consultar.
-
----
-
-## 6. Logs e execução no Fargate
-
-### 6.1 Onde ver os logs
-
-Não existe um bucket com os logs "principais" — o log corrente (stdout/
-stderr do processo, o que aparece na tela durante o `dbt build`) vai pro
-**CloudWatch Logs**:
-
-- **Log group**: `/ecs/aws-duckdb-lakehouse/dev`
-- **Stream**: `lakehouse/lakehouse/<task-id>`
-- **Retenção**: 30 dias
-
-```bash
-# acompanhar ao vivo
-aws logs tail /ecs/aws-duckdb-lakehouse/dev --follow
-
-# um stream específico
-aws logs get-log-events \
-  --log-group-name "/ecs/aws-duckdb-lakehouse/dev" \
-  --log-stream-name "lakehouse/lakehouse/<task-id>" \
-  --query "events[].message" --output text
-```
-
-Além disso, o arquivo de log **interno** do próprio dbt (`logs/dbt.log`,
-mais detalhado que o stdout) é enviado pro S3 depois de cada execução.
-
-- **Bucket**: `datalab-logs-dbt` (recurso `aws_s3_bucket.dbt_logs` em
-  `infra/s3.tf`, permissão `s3:PutObject` na `ecs_task` role em
-  `infra/main.tf`)
-- **Chave**: `dbt/<data-UTC>/<mode>/<task-id>/dbt.log`
-- **Retenção**: 90 dias (`dbt_logs_retention_days`)
-
-```bash
-aws s3 ls s3://datalab-logs-dbt/dbt/ --recursive
-aws s3 cp s3://datalab-logs-dbt/dbt/2026-09-12/dbt-build/<task-id>/dbt.log -
-```
-
-**Código responsável** — `ingestion/entrypoint.py`:
-
-| O quê | Onde |
-|---|---|
-| Descobre o ID da task do ECS (pra bater com o nome do stream no CloudWatch) | função `_run_id()` |
-| Sobe cada arquivo de `logs/*` pro bucket, monta a chave `dbt/<data>/<mode>/<run_id>/<arquivo>` | função `upload_dbt_logs()` |
-| Chama o upload depois do `dbt build`/`run`/`test` | bloco `try/finally` no `if __name__ == "__main__":` no final do arquivo |
-
-O upload acontece dentro do `finally`, então roda mesmo se o comando dbt
-falhar (é exatamente quando o log detalhado costuma ser mais útil) — e é
-**best-effort**: qualquer exceção durante o upload é capturada e logada
-(`logger.exception`), nunca propagada, pra um problema de rede/permissão no
-S3 não mascarar o código de saída real do dbt (`sys.exit(result.returncode)`
-continua refletindo só o resultado do comando dbt em si). Se
-`DBT_LOG_BUCKET` não estiver setado (ex: rodando localmente sem essa env
-var), a função simplesmente retorna sem fazer nada — não é obrigatório
-pra rodar.
-
-### 6.2 Onde ver a task rodando/rodada no Fargate
-
-**Console:** ECS → Clusters → `aws-duckdb-lakehouse-dev` → aba "Tasks"
-(mostra tasks rodando e as paradas recentemente — clique numa task pra ver
-CPU/memória, rede, e um link direto pro stream de log no CloudWatch).
-
-**CLI:**
-```bash
-# tasks rodando agora
-aws ecs list-tasks --cluster aws-duckdb-lakehouse-dev
-
-# tasks paradas recentemente (histórico limitado — não é permanente)
-aws ecs list-tasks --cluster aws-duckdb-lakehouse-dev --desired-status STOPPED
-
-# detalhes de uma task específica
-aws ecs describe-tasks --cluster aws-duckdb-lakehouse-dev --tasks <task-arn>
-```
-
-O histórico de tasks paradas no console/CLI do ECS **não é permanente** —
-pra rastrear execuções antigas de forma confiável, use o CloudWatch Logs
-(30 dias) ou o bucket de logs do dbt (90 dias), não a lista de tasks do
-ECS.
-
-Pra saber quando foi a próxima/última execução agendada:
-```bash
-aws scheduler get-schedule --name aws-duckdb-lakehouse-dev-dbt-build --group-name default
-```
-
-### 6.3 Cuidado ao mudar variáveis de ambiente da task definition
-
-A `aws_ecs_task_definition.lakehouse` (em `infra/main.tf`) tem
-`lifecycle { ignore_changes = [container_definitions] }` — isso existe de
-propósito, pra o Terraform não brigar com o `deploy.yml` (que registra
-novas revisões a cada deploy, trocando só a imagem). Só que isso tem uma
-consequência importante: **rodar `terraform apply` depois de adicionar uma
-env var nova ao `container_definitions` não propaga essa mudança pra task
-definition real** — o Terraform ignora esse campo depois da criação
-inicial.
-
-Como o `deploy.yml` sempre parte da task definition **atualmente
-registrada** (via `aws ecs describe-task-definition`) e só troca a imagem,
-uma env var nova só passa a existir nos próximos deploys se você registrar
-manualmente uma revisão nova que já a contenha — foi assim que
-`DBT_LOG_BUCKET` foi adicionado (revisão 10):
-
-```bash
-aws ecs describe-task-definition --task-definition aws-duckdb-lakehouse-dev \
-  --query "taskDefinition" --output json > taskdef.json
-
-python3 -c "
-import json
-d = json.load(open('taskdef.json'))
-for k in ['taskDefinitionArn','revision','status','requiresAttributes',
-          'compatibilities','registeredAt','registeredBy']:
-    d.pop(k, None)
-d['containerDefinitions'][0]['environment'].append(
-    {'name': 'MINHA_VAR_NOVA', 'value': 'valor'}
-)
-json.dump(d, open('taskdef.json', 'w'))
-"
-
-aws ecs register-task-definition --cli-input-json file://taskdef.json
-rm taskdef.json
-```
-
-Depois disso, a nova revisão vira a "base" — os próximos `git push`
-(que disparam o `deploy.yml`) vão carregar essa env var adiante
-automaticamente, já que cada deploy só troca a imagem em cima do que já
-está registrado.
