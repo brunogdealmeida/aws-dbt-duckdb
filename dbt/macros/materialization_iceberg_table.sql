@@ -1,15 +1,15 @@
 {#
-  dbt-duckdb's built-in `table` materialization creates an intermediate
-  relation and swaps it in via a rename (see its table.sql), and its
-  `incremental` materialization does the same on every run after the first.
-  DuckDB's Iceberg catalog integration doesn't support that rename yet
-  ("Not implemented Error: Alter Schema Entry" — confirmed by reproducing it
-  directly against the real S3 Tables bucket). Plain `DROP TABLE` +
-  `CREATE TABLE ... AS` both work fine against it, so this materialization
-  does a full drop-and-recreate every run instead of a swap. Used only for
-  the `prod` target (see dbt_project.yml); `dev` uses the standard `table`
-  materialization against a local DuckDB file, which doesn't have this
-  limitation.
+  A materialização `table` nativa do dbt-duckdb cria uma relação
+  intermediária e troca o nome via rename (ver o table.sql dela), e a
+  materialização `incremental` faz o mesmo em toda run depois da primeira.
+  A integração do DuckDB com catálogo Iceberg ainda não suporta esse
+  rename ("Not implemented Error: Alter Schema Entry" — confirmado
+  reproduzindo direto contra o bucket real do S3 Tables). `DROP TABLE` +
+  `CREATE TABLE ... AS` simples funcionam bem contra ele, então essa
+  materialização faz um drop-and-recreate completo em toda run em vez de
+  um swap. Usada só no target `prod` (ver dbt_project.yml); o `dev` usa a
+  materialização `table` padrão contra um arquivo DuckDB local, que não
+  tem essa limitação.
 #}
 {% materialization iceberg_table, adapter='duckdb' %}
   {%- set target_relation = this.incorporate(type='table') -%}
@@ -19,12 +19,12 @@
   {{ run_hooks(pre_hooks, inside_transaction=True) }}
 
   {% if existing_relation is not none %}
-    {#-- adapter.drop_relation() issues DROP ... CASCADE, unsupported on
-         Iceberg tables; a plain DROP TABLE works fine. Committed on its own
-         before the CREATE below: newer duckdb-iceberg extension versions
-         reject creating a table with the same name deleted earlier in the
-         same still-open transaction ("Cannot create table deleted within a
-         transaction"). #}
+    {#-- adapter.drop_relation() emite DROP ... CASCADE, não suportado em
+         tabelas Iceberg; um DROP TABLE simples funciona bem. Commitado
+         separadamente antes do CREATE abaixo: versões mais novas da
+         extensão duckdb-iceberg rejeitam criar uma tabela com o mesmo nome
+         de uma apagada antes, ainda na mesma transação aberta ("Cannot
+         create table deleted within a transaction"). #}
     {% call statement('drop_existing') -%}
       drop table if exists {{ target_relation }}
     {%- endcall %}
