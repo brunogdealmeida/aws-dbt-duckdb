@@ -133,6 +133,7 @@ resource "aws_ecs_task_definition" "lakehouse" {
       { name = "LANDING_BUCKET", value = var.landing_bucket_name },
       { name = "S3_TABLE_BUCKET", value = var.s3_tables_bucket_name },
       { name = "S3_TABLES_NAMESPACE", value = var.s3_tables_namespace },
+      { name = "S3_TABLES_GOLD_NAMESPACE", value = var.s3_tables_gold_namespace },
       { name = "AWS_ACCOUNT_ID", value = data.aws_caller_identity.current.account_id },
       { name = "DBT_LOG_BUCKET", value = var.dbt_logs_bucket_name }
     ]

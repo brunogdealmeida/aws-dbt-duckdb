@@ -1,0 +1,33 @@
+version: 2
+
+models:
+  - name: fct_portfolio_revenue
+    description: >
+      Receita mensal por carteira/gerente/região, atribuída point-in-time
+      contra a dimensão SCD Tipo 2 dim_client_portfolio — cada pedido conta
+      pra carteira que era dona do cliente na data do pedido, não pra atual.
+    columns:
+      - name: order_month
+        data_tests:
+          - not_null
+      - name: portfolio_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_client_portfolio')
+                field: portfolio_id
+      - name: manager_id
+        data_tests:
+          - not_null
+      - name: order_count
+        data_tests:
+          - not_null
+      - name: active_customers
+        data_tests:
+          - not_null
+      - name: tier
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ['platinum', 'gold', 'silver', 'bronze']

@@ -11,3 +11,11 @@ resource "aws_s3tables_namespace" "silver" {
   table_bucket_arn = aws_s3tables_table_bucket.lakehouse.arn
   namespace        = var.s3_tables_namespace
 }
+
+# Camada gold (agregados analíticos) — namespace separado no mesmo table
+# bucket, não um bucket novo: dbt-duckdb anexa um bucket só e escreve nos
+# dois namespaces como schemas diferentes do mesmo catálogo.
+resource "aws_s3tables_namespace" "gold" {
+  table_bucket_arn = aws_s3tables_table_bucket.lakehouse.arn
+  namespace        = var.s3_tables_gold_namespace
+}

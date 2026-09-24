@@ -56,6 +56,46 @@ models:
               arguments:
                 values: ['retail', 'wholesale', 'vip']
 
+  - name: dim_client_portfolio
+    description: >
+      Dimensão SCD Tipo 2 da hierarquia de carteira de clientes (cliente ->
+      carteira -> gerente -> região/tier). Uma linha por versão; a versão
+      vigente tem is_current = true e valid_to = null. Mantida pela
+      estratégia customizada `scd2_merge`
+      (macros/incremental_strategy_scd2_merge.sql).
+    columns:
+      - name: portfolio_version_key
+        description: Chave substituta da versão — PK da dimensão.
+        data_tests:
+          - unique
+          - not_null
+      - name: customer_id
+        description: >
+          Chave natural. Única *entre as versões correntes* — o histórico
+          tem várias linhas por cliente de propósito, por isso o filtro.
+        data_tests:
+          - not_null
+          - unique:
+              config:
+                where: "is_current"
+      - name: portfolio_id
+        data_tests:
+          - not_null
+      - name: manager_id
+        data_tests:
+          - not_null
+      - name: valid_from
+        data_tests:
+          - not_null
+      - name: is_current
+        data_tests:
+          - not_null
+      - name: tier
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ['platinum', 'gold', 'silver', 'bronze']
+
   - name: stg_inventory
     description: >
       Incremental inventory — baseline from bronze.inventory on first run,

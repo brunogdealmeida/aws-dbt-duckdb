@@ -1,0 +1,7 @@
+customer_id,portfolio_id,portfolio_name,manager_id,manager_name,region,tier
+101,1,Portfolio 1,1,Manager 1,br,Platinum
+102,1,Portfolio 1,1,Manager 1,BR,platinum
+103,2,Portfolio 2,2,Manager 2,us,GOLD
+104,2,Portfolio 2,2,Manager 2,US,gold
+105,3,Portfolio 3,3,Manager 3,PT,Silver
+106,3,Portfolio 3,3,Manager 3,pt,silver

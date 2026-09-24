@@ -122,7 +122,7 @@ resource "awscc_glue_catalog" "s3tables" {
 }
 
 # Let the ECS task role (dbt/ingestion) and any additional reader principals
-# query the silver namespace through Athena via Lake Formation.
+# query the silver and gold namespaces through Athena via Lake Formation.
 #
 # Uses `count` (not `for_each`) on purpose: the ECS task role ARN isn't known
 # until it's created, and for_each requires its full key set to be known at
@@ -151,5 +151,24 @@ resource "aws_lakeformation_permissions" "silver_readers" {
   # Lake Formation data lake administrator — a separate permission layer on
   # top of IAM, so this must not run before the admin registration below,
   # even though nothing else ties them together in the dependency graph.
+  depends_on = [awscc_glue_catalog.s3tables, aws_lakeformation_data_lake_settings.this]
+}
+
+# Mesmas permissões, para o namespace gold. Bloco separado (em vez de um
+# produto cartesiano principal × namespace num só resource) para não renomear
+# o resource acima: mudar o endereço dele no state faria o Terraform revogar
+# e reconceder as permissões do silver que já estão aplicadas.
+resource "aws_lakeformation_permissions" "gold_readers" {
+  count = var.enable_lakeformation_s3tables_integration ? length(local.silver_reader_principals) : 0
+
+  principal   = local.silver_reader_principals[count.index]
+  permissions = ["DESCRIBE", "SELECT"]
+
+  table {
+    catalog_id    = local.s3tables_namespace_database
+    database_name = aws_s3tables_namespace.gold.namespace
+    wildcard      = true
+  }
+
   depends_on = [awscc_glue_catalog.s3tables, aws_lakeformation_data_lake_settings.this]
 }

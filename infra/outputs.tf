@@ -30,6 +30,10 @@ output "s3_tables_namespace" {
   value = aws_s3tables_namespace.silver.namespace
 }
 
+output "s3_tables_gold_namespace" {
+  value = aws_s3tables_namespace.gold.namespace
+}
+
 output "athena_workgroup_name" {
   value = aws_athena_workgroup.lakehouse.name
 }

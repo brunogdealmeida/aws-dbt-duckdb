@@ -13,3 +13,11 @@ models:
       +materialized: "{{ 'iceberg_table' if target.name == 'prod' else 'table' }}"
       +database: "{{ 's3_tables' if target.name == 'prod' else target.database }}"
       +schema: "{{ env_var('S3_TABLES_NAMESPACE', 'silver') if target.name == 'prod' else 'silver' }}"
+
+    # Camada gold: agregados analíticos, reconstruídos inteiros a cada run
+    # (não incrementais). Namespace/schema separado do silver — no prod é um
+    # segundo namespace do mesmo bucket de S3 Tables (infra/s3tables.tf).
+    gold:
+      +materialized: "{{ 'iceberg_table' if target.name == 'prod' else 'table' }}"
+      +database: "{{ 's3_tables' if target.name == 'prod' else target.database }}"
+      +schema: "{{ env_var('S3_TABLES_GOLD_NAMESPACE', 'gold') if target.name == 'prod' else 'gold' }}"

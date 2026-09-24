@@ -63,6 +63,12 @@ variable "s3_tables_namespace" {
   default     = "silver"
 }
 
+variable "s3_tables_gold_namespace" {
+  description = "S3 Tables namespace (maps to a DuckDB/Athena schema) that holds the gold Iceberg tables, in the same table bucket as the silver namespace."
+  type        = string
+  default     = "gold"
+}
+
 variable "athena_results_bucket_name" {
   description = "S3 bucket for Athena query results. Must be globally unique."
   type        = string

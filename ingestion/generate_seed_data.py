@@ -5,8 +5,9 @@
 #
 # The three entities are relationally consistent by construction, so the
 # silver models can be joined into a gold layer later:
-#   orders.customer_id -> clients.customer_id
-#   orders.product_id  -> inventory.product_id
+#   orders.customer_id     -> clients.customer_id
+#   orders.product_id      -> inventory.product_id
+#   portfolios.customer_id -> clients.customer_id
 # orders.amount is derived from inventory.unit_cost * quantity (with noise),
 # so revenue/margin roll-ups in gold will actually reconcile against
 # inventory costs instead of being random noise.
@@ -30,6 +31,8 @@ OUTPUT_ROOT = Path(__file__).parent / "seed_data" / "bronze"
 ORDERS_ROWS = 5_000_000
 CLIENTS_ROWS = 100_000
 INVENTORY_ROWS = 1_000_000
+PORTFOLIOS_COUNT = 500
+MANAGERS_COUNT = 50
 
 
 def write_table_to_csv(con: duckdb.DuckDBPyConnection, table: str, path: Path) -> None:
@@ -60,6 +63,42 @@ def main() -> None:
         FROM range(1, {CLIENTS_ROWS + 1}) t(i)
     """)
     write_table_to_csv(con, "clients_seed", OUTPUT_ROOT / "clients" / "clients.csv")
+
+    logger.info("Generating portfolios (hierarchy snapshot for %d clients)...", CLIENTS_ROWS)
+    # Hierarquia de carteira: cliente -> carteira -> gerente -> região/tier.
+    # Snapshot completo do estado atual (uma linha por cliente), que é o
+    # formato que a dimensão SCD Tipo 2 dim_client_portfolio espera — ela
+    # compara snapshots sucessivos pra detectar o que mudou. Simule mudanças
+    # com ingestion/simulate_portfolio_changes.py.
+    con.execute(f"""
+        CREATE OR REPLACE TABLE portfolios_seed AS
+        WITH portfolio_dim AS (
+            SELECT
+                p AS portfolio_id,
+                'Portfolio ' || p AS portfolio_name,
+                1 + ((p - 1) % {MANAGERS_COUNT}) AS manager_id,
+                (['BR', 'US', 'PT', 'AR', 'MX'])[1 + ((p - 1) % 5)] AS region,
+                (['platinum', 'gold', 'silver', 'bronze'])[1 + ((p - 1) % 4)] AS tier
+            FROM range(1, {PORTFOLIOS_COUNT} + 1) t(p)
+        ),
+        assignment AS (
+            SELECT
+                i AS customer_id,
+                1 + (random() * ({PORTFOLIOS_COUNT} - 1))::INT AS portfolio_id
+            FROM range(1, {CLIENTS_ROWS} + 1) t(i)
+        )
+        SELECT
+            a.customer_id,
+            pd.portfolio_id,
+            pd.portfolio_name,
+            pd.manager_id,
+            'Manager ' || pd.manager_id AS manager_name,
+            pd.region,
+            pd.tier
+        FROM assignment a
+        JOIN portfolio_dim pd ON pd.portfolio_id = a.portfolio_id
+    """)
+    write_table_to_csv(con, "portfolios_seed", OUTPUT_ROOT / "portfolios" / "portfolios.csv")
 
     logger.info("Generating inventory (%d rows)...", INVENTORY_ROWS)
     con.execute(f"""

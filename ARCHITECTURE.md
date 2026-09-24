@@ -38,6 +38,9 @@ ingestion/ingest_csv.py (ou generate_seed_data.py)
    dbt/models/silver/stg_{orders,clients,inventory}.sql
    (cast de tipos, normalização de texto, filtro de chaves nulas — e,
     a partir da 2a run, merge do lote CDC mais recente)
+
+   dbt/models/silver/dim_client_portfolio.sql
+   (dimensão SCD Tipo 2 da hierarquia de carteira — ver §8)
             |
             v
    DuckDB ATTACH ... (TYPE iceberg, ENDPOINT_TYPE s3_tables)
@@ -46,19 +49,27 @@ ingestion/ingest_csv.py (ou generate_seed_data.py)
    S3 Tables — bucket dedicado, database `silver` (formato Iceberg)  <- camada silver
             |
             v
+   dbt/models/gold/fct_portfolio_revenue.sql
+   (agregado analítico com atribuição point-in-time contra a SCD2)
+            |
+            v
+   S3 Tables — mesmo bucket, database `gold` (formato Iceberg)       <- camada gold
+            |
+            v
    Federação Glue Data Catalog (s3tablescatalog) + Lake Formation
             |
             v
    Athena (data source `datalab-duckdb`)
 ```
 
-As três entidades da camada silver têm integridade referencial de verdade pra usar em uma futura camada
+As entidades da camada silver têm integridade referencial de verdade, que é o que sustenta a camada
 gold:
 
 ```text
-orders.customer_id -> clients.customer_id
-orders.product_id  -> inventory.product_id
-orders.amount        é derivado de inventory.unit_cost * quantity (com ruído)
+orders.customer_id     -> clients.customer_id
+orders.product_id      -> inventory.product_id
+portfolios.customer_id -> clients.customer_id
+orders.amount            é derivado de inventory.unit_cost * quantity (com ruído)
 ```
 
 ### 1.2 Execução / orquestração
@@ -129,7 +140,7 @@ Essa etapa é necessária pois o Terraform precisa de um state permanente por is
 | `versions.tf` / `backend.tf` | providers `aws`+`awscc`, backend S3 | Config base |
 | `main.tf` | ECR, cluster ECS, task definition Fargate, log group, IAM roles (`ecs_execution`, `ecs_task`, `github_deploy`), OIDC provider do GitHub | Compute + deploy |
 | `s3.tf` | `aws_s3_bucket.landing` (+ versionamento, criptografia, bloqueio público) | Camada bronze |
-| `s3tables.tf` | `aws_s3tables_table_bucket`, `aws_s3tables_namespace.silver` | Camada silver (Iceberg) |
+| `s3tables.tf` | `aws_s3tables_table_bucket`, `aws_s3tables_namespace.silver`, `aws_s3tables_namespace.gold` | Camadas silver e gold (Iceberg), dois namespaces no mesmo table bucket |
 | `glue_lakeformation.tf` | Role de federação, `aws_lakeformation_resource`, `aws_lakeformation_data_lake_settings`, `awscc_glue_catalog.s3tables`, `aws_lakeformation_permissions` | Torna o S3 Tables visível/consultável pelo Glue + Lake Formation |
 | `athena.tf` | Bucket de resultados, `aws_athena_workgroup`, `aws_athena_data_catalog` (nome: `datalab-duckdb`) | Consulta via Athena |
 | `scheduler.tf` | Role do EventBridge Scheduler, `aws_scheduler_schedule.dbt_build` | Roda `dbt build` todo dia às 03:00 UTC |
@@ -141,20 +152,26 @@ Essa etapa é necessária pois o Terraform precisa de um state permanente por is
 |---|---|
 | `profiles.yml` | Target `dev` (100% local, sem AWS) e `prod` (ECS, anexa o S3 Tables via `attach`/`secrets`) |
 | `dbt_project.yml` | Config condicional por target: materialização, `database`, `schema` |
-| `models/sources.yml` | Fontes bronze (`orders`, `clients`, `inventory` + `*_cdc`), lidas via `external_location` |
+| `models/sources.yml` | Fontes bronze (`orders`, `clients`, `inventory` + `*_cdc`, `portfolios`), lidas via `external_location` |
 | `models/silver/schema.yml` | Testes básicos (`unique`, `not_null`, `accepted_values`, `relationships`) — só têm efeito com `dbt build`/`dbt test`, não com `dbt run` (ver §3.20) |
 | `models/silver/stg_{orders,clients,inventory}.sql` | Incrementais: baseline (cast, normalização, filtro de PK) direto de `bronze.<entidade>` na primeira run, depois aplicam o lote CDC mais recente de `bronze.<entidade>_cdc` (`incremental_strategy='cdc_merge'`) — ver §6 |
 | `macros/generate_schema_name.sql` | Faz o schema resolver pra `silver` (não `main_silver`, que é o padrão do dbt) |
 | `macros/materialization_iceberg_table.sql` | Materialização customizada pro target `prod` (ver §3.7) |
+| `models/silver/dim_client_portfolio.sql` | Dimensão **SCD Tipo 2** da hierarquia de carteira de clientes (`incremental_strategy='scd2_merge'`) — ver §8 |
+| `models/gold/fct_portfolio_revenue.sql` | Camada **gold**: receita mensal por carteira/gerente/região, com atribuição point-in-time contra a SCD2 — ver §8 |
+| `models/gold/schema.yml` | Testes da camada gold |
+| `tests/assert_scd2_*.sql` | Testes singulares que provam as invariantes da SCD2 (sem sobreposição de versões; `is_current` coerente com `valid_to`) — ver §3.23 |
 | `macros/incremental_strategy_cdc_merge.sql` | Estratégia incremental customizada `cdc_merge` (DELETE + MERGE em dois statements — ver §3.17) |
+| `macros/incremental_strategy_scd2_merge.sql` | Estratégia incremental customizada `scd2_merge`, que mantém a SCD Tipo 2 (UPDATE + INSERT em dois statements — ver §7.4) |
 
 ### 2.4 Ingestão (`ingestion/`)
 
 | Arquivo | Propósito |
 |---|---|
 | `ingest_csv.py` | Sobe CSVs locais pro landing bucket (`bronze/<source>/`) |
-| `generate_seed_data.py` | Gera dados de teste em volume real via DuckDB (orders=5M, clients=100k, inventory=1M linhas), com FKs íntegras |
+| `generate_seed_data.py` | Gera dados de teste em volume real via DuckDB (orders=5M, clients=100k, inventory=1M linhas, + snapshot de hierarquia de carteira: 500 carteiras / 50 gerentes), com FKs íntegras |
 | `simulate_cdc.py` | Gera e sobe lotes de CDC (insert/update/delete) pra simular mudanças incrementais — ver §6 |
+| `simulate_portfolio_changes.py` | Reescreve o snapshot da hierarquia de carteira (clientes trocam de carteira; carteiras trocam de gerente/região) pra alimentar a SCD Tipo 2 — ver §8 |
 | `sample_data/*.csv` | Amostras pequenas e FK-consistentes, usadas pelo target `dev`/CI |
 | `sample_data/*_cdc.csv` | Lotes de CDC de exemplo (mão), usados pelo target `dev`/CI pros models incrementais |
 
@@ -505,6 +522,65 @@ Revalidado de ponta a ponta (`dbt parse`, `dbt compile`, e `dbt build
 --target dev` três vezes seguidas — baseline, incremental, reaplicação)
 depois das três correções, sem erros nem warnings.
 
+### 3.23 Teste de SCD2 dava falso positivo em cliente que sai e volta
+
+**Sintoma:** ao validar a dimensão SCD Tipo 2 (§8), o teste singular
+`assert_scd2_timeline_contiguous` falhou num cenário perfeitamente
+legítimo — um cliente que saiu do snapshot da hierarquia numa carga e
+voltou na seguinte.
+**Causa:** o teste, como escrito primeiro, exigia que o `valid_to` de uma
+versão fosse **exatamente** o `valid_from` da seguinte, tratando qualquer
+buraco na linha do tempo como defeito. Mas quando a chave some do snapshot
+a estratégia fecha a versão vigente e **não** abre nenhuma nova (correto:
+aquele cliente deixou de ter carteira); se ele reaparece depois, uma nova
+versão é aberta na data do retorno. O intervalo entre as duas não é um bug
+— é justamente o período em que ele não tinha carteira, e o join
+point-in-time do gold tem que não casar nada ali mesmo.
+**Correção:** o teste passou a checar só o que de fato corrompe o
+resultado — **sobreposição** (`valid_to > valid_from` da seguinte, que faria
+um fato casar com duas versões e ser contado em dobro) e versão não fechada
+com sucessora. Buracos deixaram de ser erro, com o porquê registrado no
+próprio arquivo de teste.
+**Verificado que o teste ainda falha quando deve:** injetando uma linha com
+intervalo sobreposto na dimensão, ele acusou (`Got 1 result, configured to
+fail if != 0`) — sem essa checagem, a correção acima poderia ter virado um
+teste que nunca pega nada.
+
+### 3.24 `simulate_portfolio_changes.py`: dois jeitos de corromper o snapshot em silêncio
+
+Os dois apareceram testando o script de simulação da hierarquia, não em
+produção — e os dois seriam invisíveis até estragarem a SCD2 lá na frente.
+
+**(a) Carteira com atributos divergentes abria o join em leque.** O catálogo
+de carteiras saía de um `SELECT DISTINCT portfolio_id, portfolio_name,
+manager_id, ...` do snapshot. Se a mesma carteira aparecesse com atributos
+diferentes (drift da origem, ou snapshot montado à mão), o DISTINCT devolvia
+várias linhas pro mesmo `portfolio_id` e o join com a atribuição de clientes
+multiplicava linhas — 1.000 clientes viraram 2.943. Na SCD2 isso abriria
+**duas versões vigentes pro mesmo cliente**, quebrando todo join
+point-in-time daí pra frente. **Correção:** `QUALIFY row_number() OVER
+(PARTITION BY portfolio_id ...) = 1`, garantindo uma linha por carteira
+independente da qualidade da entrada.
+
+**(b) Sorteio de carteira assumia ids densos e descartava clientes.** Uma
+reatribuição sorteava `1 + random()*(n-1)` como se fosse o próprio
+`portfolio_id`, o que só vale enquanto os ids forem 1..n contíguos. Não são:
+uma carteira que perde todos os clientes some do snapshot. A partir daí o
+sorteio apontava pra id inexistente e o cliente era **descartado no join** —
+2.000 clientes viraram 1.998 na terceira rodada. O efeito na SCD2 seria
+ainda pior que perder linhas: clientes sumindo do snapshot são interpretados
+como saída legítima da hierarquia, então suas versões seriam *fechadas*, do
+jeito certo, por um motivo errado. **Correção:** sortear pelo índice de um
+`row_number()` sobre as carteiras que de fato existem, nunca pelo id.
+
+**O que achou os dois:** um guard de invariante no fim do `mutate()` — o
+snapshot de saída tem que ter exatamente os mesmos clientes da entrada, já
+que o script só muda atributos e nunca a população. O (a) foi pego por um
+teste com snapshot propositalmente malformado; o (b) só apareceu na 3ª
+rodada seguida, e por isso o script passou a ser testado com 8 rodadas
+encadeadas, em que dá pra ver as carteiras encolhendo (490 -> 482) sem a
+população de clientes mudar.
+
 ---
 
 ## 4. Como renomear buckets / namespace / catálogo do Athena
@@ -797,3 +873,153 @@ isso:
    ambiguidade pro caso de delete. Os dois statements, separados por
    `;`, rodam numa única chamada `execute()` do DuckDB — é assim que o
    dbt-duckdb executa o SQL compilado de uma materialização.
+
+### 7.4 `incremental_strategy_scd2_merge.sql` — estratégia `scd2_merge`
+
+**O que é:** o par de macros (repassador sem prefixo +
+implementação `duckdb__`, pelo mesmo motivo de dispatch explicado em §7.3)
+que mantém uma dimensão **SCD Tipo 2** em cima de uma tabela Iceberg. Usada
+por `models/silver/dim_client_portfolio.sql` via
+`incremental_strategy='scd2_merge'`.
+
+**O que recebe:** o model entrega um *snapshot completo* do estado atual —
+uma linha por chave natural, já com `scd_hash` (hash só dos atributos
+rastreados), `valid_from`, `valid_to` e `is_current`. A macro não sabe nada
+do negócio; ela só compara esse snapshot com o que já está na dimensão.
+
+**Como funciona**, em dois statements:
+
+1. **UPDATE — fecha versões.** Marca `valid_to` = timestamp do lote e
+   `is_current` = false em toda versão vigente cuja chave (a) sumiu do
+   snapshot ou (b) teve o `scd_hash` alterado. O timestamp do lote sai de
+   `max(valid_from)` do *próprio snapshot*, não de um `current_timestamp`
+   novo — assim o `valid_to` da versão fechada é exatamente o `valid_from`
+   da que vai abrir, sem buraco nem sobreposição na linha do tempo.
+2. **INSERT — abre versões.** Depois do passo 1, toda chave que mudou ficou
+   sem versão vigente, então um único anti-join (`left join ... where t.<pk>
+   is null`) pega de uma vez as chaves novas **e** as que acabaram de ser
+   fechadas — e ignora as inalteradas, que seguem com a versão aberta e não
+   geram histórico à toa.
+
+**Por que dois statements e não um MERGE:** uma chave que mudou precisa de
+UPDATE (fechar a antiga) *e* INSERT (abrir a nova) para a mesma linha de
+origem, o que um MERGE não expressa; e o Iceberg do DuckDB ainda por cima
+só aceita uma ação de UPDATE/DELETE por MERGE (§3.17). Confirmado direto
+contra o bucket real do S3 Tables, antes de escrever a macro, que as duas
+formas usadas aqui funcionam no Iceberg: `UPDATE ... WHERE <chave> IN
+(subquery)` e `INSERT ... SELECT` com anti-join contra a própria tabela
+alvo.
+
+**Configs opcionais do model**, caso as colunas de controle tenham outros
+nomes: `scd2_hash_column` (default `scd_hash`), `scd2_valid_from_column`
+(`valid_from`), `scd2_valid_to_column` (`valid_to`) e
+`scd2_is_current_column` (`is_current`).
+
+---
+
+## 8. SCD Tipo 2: hierarquia de carteira de clientes + camada gold
+
+### 8.1 O problema que a SCD2 resolve
+
+A hierarquia de carteira (**cliente -> carteira -> gerente -> região/tier**)
+muda com o tempo: cliente migra de carteira, carteira troca de gerente.
+Se a dimensão guardasse só o estado atual, todo relatório histórico seria
+reescrito a cada mudança — a receita que o gerente A trouxe no ano passado
+apareceria como do gerente B só porque a carteira mudou de dono ontem.
+Comissionamento, meta e série histórica ficam errados.
+
+A dimensão `silver.dim_client_portfolio` guarda **uma linha por versão**:
+
+| coluna | papel |
+|---|---|
+| `portfolio_version_key` | chave substituta da versão (PK da dimensão) |
+| `customer_id` | chave natural (várias linhas por cliente, uma por versão) |
+| `portfolio_id`, `manager_id`, `region`, `tier` | atributos rastreados |
+| `portfolio_name`, `manager_name` | descritivos, **fora** do hash de propósito (um rename não gera versão nova) |
+| `scd_hash` | hash dos atributos rastreados — é ele que decide se mudou |
+| `valid_from` / `valid_to` | intervalo de validade, fechado-aberto `[valid_from, valid_to)` |
+| `is_current` | `true` na versão vigente (redundante com `valid_to is null`, mas é o filtro barato do dia a dia) |
+
+A carga inicial abre a primeira versão com `valid_from = 1900-01-01`, não
+com o instante do primeiro `dbt build`: sem isso, nenhum pedido histórico
+casaria com nenhuma versão e a camada gold sairia vazia.
+
+### 8.2 A análise no gold
+
+`gold.fct_portfolio_revenue` agrega receita mensal por
+carteira/gerente/região fazendo o **join point-in-time** — cada pedido casa
+com a versão vigente *na data do pedido*:
+
+```sql
+join dim_client_portfolio d
+  on d.customer_id = o.customer_id
+ and cast(o.order_date as timestamp) >= d.valid_from
+ and (d.valid_to is null or cast(o.order_date as timestamp) < d.valid_to)
+```
+
+O intervalo é fechado-aberto pra que um pedido feito exatamente no instante
+da troca caia só na versão nova. `valid_from`/`valid_to` são `timestamp`
+sem timezone de propósito: comparar com `order_date` (DATE) em
+`timestamptz` deixaria o resultado dependente do fuso da sessão.
+
+Grão: uma linha por (carteira-na-época × mês). Métricas separam pago de
+pendente/estornado (`paid_revenue`, `pending_amount`, `refunded_amount`) em
+vez de somar tudo junto.
+
+### 8.3 Como rodar e simular mudanças
+
+```bash
+python ingestion/generate_seed_data.py          # inclui o snapshot inicial da hierarquia
+dbt build --target prod --select dim_client_portfolio+   # carga inicial + gold
+
+# simula uma rodada de mudanças e reprocessa
+python ingestion/simulate_portfolio_changes.py --reassign-pct 3 --rehome-pct 5
+dbt build --target prod --select dim_client_portfolio+
+```
+
+`simulate_portfolio_changes.py` **substitui** o snapshot
+(`bronze/portfolios/portfolios.csv`, mesma key no S3) em vez de acumular
+arquivos como o `simulate_cdc.py` faz — a fonte aqui é snapshot completo, e
+dois arquivos no mesmo prefixo fariam o glob devolver o cliente duas vezes
+e abrir duas versões vigentes pra ele.
+
+### 8.4 O que foi validado
+
+Rodado de ponta a ponta no target `dev`, cobrindo os quatro caminhos da
+estratégia — com o resultado conferido linha a linha, não só "o dbt disse
+que passou":
+
+| cenário | esperado | resultado |
+|---|---|---|
+| carga inicial | 1 versão por cliente, `valid_from` = 1900-01-01 | ✅ 6 clientes, 6 versões vigentes |
+| cliente troca de carteira | fecha a antiga + abre a nova | ✅ 2 linhas, `valid_to` da antiga = `valid_from` da nova |
+| carteira troca de gerente | versiona **todos** os clientes dela | ✅ 105 e 106 versionados juntos |
+| cliente sem mudança | nada acontece | ✅ segue com 1 linha, sem versão nova |
+| rodar de novo sem mudança | idempotente | ✅ contagem não muda |
+| cliente some do snapshot | fecha a vigente, **não** abre nova | ✅ |
+| cliente reaparece | abre versão nova (com buraco legítimo — §3.23) | ✅ |
+
+E a prova de que a atribuição point-in-time funciona: depois de mover o
+cliente 101 da carteira 1 (gerente 1/BR) para a 2 (gerente 2/US), os
+pedidos dele de janeiro **continuaram** atribuídos à carteira 1 no gold —
+o histórico não foi reescrito.
+
+38/38 testes passando (incluindo os dois singulares da SCD2) em três
+`dbt build` seguidos.
+
+Detalhe do deploy: a task definition do ECS tem
+`lifecycle { ignore_changes = [container_definitions] }` e o `deploy.yml`
+registra revisões novas fora do Terraform (§3.15), então a variável
+`S3_TABLES_GOLD_NAMESPACE` adicionada em `infra/main.tf` **não** chega
+sozinha ao container. Não é problema: o `dbt_project.yml` usa
+`env_var('S3_TABLES_GOLD_NAMESPACE', 'gold')`, e o default `gold` é
+exatamente o valor do Terraform — a variável está lá por clareza, não por
+necessidade.
+
+**Ainda não validado contra a AWS real:** as mecânicas de SQL que a
+estratégia usa foram testadas direto no bucket Iceberg de produção (§7.4),
+mas o namespace `gold` é infra nova — depende de um `terraform apply` que
+ainda não foi feito. O `terraform validate`/`plan` também não rodou aqui
+(sem acesso de rede ao registry de providers); só `terraform fmt -check`,
+que passou.
+
