@@ -1016,10 +1016,31 @@ sozinha ao container. Não é problema: o `dbt_project.yml` usa
 exatamente o valor do Terraform — a variável está lá por clareza, não por
 necessidade.
 
-**Ainda não validado contra a AWS real:** as mecânicas de SQL que a
-estratégia usa foram testadas direto no bucket Iceberg de produção (§7.4),
-mas o namespace `gold` é infra nova — depende de um `terraform apply` que
-ainda não foi feito. O `terraform validate`/`plan` também não rodou aqui
-(sem acesso de rede ao registry de providers); só `terraform fmt -check`,
-que passou.
+**Validado também contra a AWS real** (S3 Tables + Athena), depois que o
+`terraform apply` criou o namespace `gold`:
+
+| verificação | resultado |
+|---|---|
+| carga inicial (100k clientes, 5M pedidos) | ✅ 40s, 20/20 testes |
+| aplicar 8.236 mudanças de carteira | ✅ 51s, 20/20 testes |
+| contagem da dimensão via Athena | ✅ 108.236 versões / 100.000 vigentes / 8.236 fechadas / 100.000 clientes — exatamente o previsto |
+| `gold.fct_portfolio_revenue` via Athena (namespace novo) | ✅ 16.500 linhas, 4.974.852 pedidos, R$ 2,22 bi de receita paga, 2024-01 a 2026-09 |
+
+E a demonstração de por que a SCD2 existe, em dados reais: o cliente 15 saiu
+da carteira 122 (gerente 22 / US / gold) para a 220 (gerente 20 / MX /
+bronze). Os 50 pedidos dele são atribuídos assim:
+
+| critério | carteira | pedidos |
+|---|---|---|
+| point-in-time (SCD2) | **122** (a da época) | 50 |
+| só a carteira atual | 220 (a de hoje) | 50 |
+
+Ou seja: sem a SCD2, 50 pedidos de receita mudariam de dono silenciosamente
+do gerente 22 para o 20 — e o mesmo valeria pros outros 8.235 clientes que
+mudaram nessa rodada.
+
+O `terraform validate`/`plan` não chegou a rodar localmente (sem acesso de
+rede ao registry de providers); só `terraform fmt -check`. O plan/apply de
+verdade rodou no CI, criando 2 recursos (namespace `gold` + permissões de
+Lake Formation) sem alterar nem destruir nada.
 
