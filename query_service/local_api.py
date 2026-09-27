@@ -11,10 +11,13 @@
 # possible without needing a database reachable from Lambda.
 import json
 import os
+import tempfile
 
 import boto3
 import botocore.exceptions
+import duckdb
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 import db
@@ -32,6 +35,38 @@ app = FastAPI(title="quack-on-demand (local)")
 
 s3 = boto3.client("s3")
 ecs = boto3.client("ecs")
+
+# How many rows of a succeeded query's result the UI renders inline as a
+# table — independent of the actual row_count, which can be millions (see
+# ARCHITECTURE.md's validated 5M-row baseline). The full result is always
+# still downloadable via the presigned result_url; this cap just keeps the
+# browser from trying to render an enormous <table>.
+PREVIEW_ROW_LIMIT = 500
+
+
+def _preview_result(bucket: str, key: str) -> dict:
+    """Downloads a query's result.parquet and reads back up to
+    PREVIEW_ROW_LIMIT rows as JSON-safe columns/rows for the UI — done here
+    (not in the browser) so the UI never needs a parquet parser, just
+    fetch() + a <table>. Best-effort: a failure here shouldn't take down an
+    otherwise-successful status response, so callers get {} on error rather
+    than a 500.
+    """
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".parquet") as tmp:
+            s3.download_file(bucket, key, tmp.name)
+            con = duckdb.connect()
+            cur = con.execute(f"SELECT * FROM read_parquet('{tmp.name}') LIMIT {PREVIEW_ROW_LIMIT}")
+            columns = [d[0] for d in cur.description]
+            # str(v) for anything JSON can't natively carry (Decimal, date,
+            # datetime, etc.) — this is a display preview, not a typed API,
+            # so stringifying uniformly is simpler than mapping every
+            # DuckDB type FastAPI's encoder does and doesn't already handle.
+            rows = [[v if isinstance(v, (str, int, float, bool)) or v is None else str(v) for v in row]
+                    for row in cur.fetchall()]
+            return {"preview_columns": columns, "preview_rows": rows}
+    except Exception as exc:
+        return {"preview_error": str(exc)}
 
 
 class SubmitQuery(BaseModel):
@@ -75,6 +110,11 @@ def _submit(sql: str) -> dict:
     return {"job_id": job_id, "status": "queued"}
 
 
+@app.get("/")
+def ui():
+    return FileResponse("static/index.html")
+
+
 @app.post("/queries", status_code=202)
 def submit_query(body: SubmitQuery):
     return _submit(body.sql)
@@ -106,6 +146,7 @@ def get_query(job_id: str):
             Params={"Bucket": bucket, "Key": result_key(job_id)},
             ExpiresIn=int(os.environ.get("RESULT_URL_TTL_SECONDS", "3600")),
         )
+        status.update(_preview_result(bucket, result_key(job_id)))
     return status
 
 

@@ -1,0 +1,273 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<title>Quack on demand</title>
+<style>
+  :root { color-scheme: light; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: #f6f7f9; color: #1a1a1a; display: flex; height: 100vh;
+  }
+  aside {
+    width: 280px; flex: none; background: #fff; border-right: 1px solid #e2e4e8;
+    padding: 16px; overflow-y: auto; display: flex; flex-direction: column; gap: 20px;
+  }
+  main { flex: 1; padding: 20px 28px; overflow-y: auto; display: flex; flex-direction: column; gap: 14px; }
+  h1 { font-size: 18px; margin: 0 0 4px; }
+  h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: #6b7280; margin: 0 0 8px; }
+  textarea {
+    width: 100%; min-height: 140px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 13.5px; padding: 10px; border: 1px solid #d6d9de; border-radius: 6px; resize: vertical;
+  }
+  .row { display: flex; gap: 10px; align-items: center; }
+  button {
+    cursor: pointer; border: 1px solid #d6d9de; background: #fff; border-radius: 6px;
+    padding: 7px 14px; font-size: 13px; color: #1a1a1a;
+  }
+  button.primary { background: #1a1a1a; color: #fff; border-color: #1a1a1a; }
+  button:disabled { opacity: .5; cursor: default; }
+  button.small { padding: 3px 9px; font-size: 12px; }
+  #status { font-size: 13px; color: #6b7280; }
+  #status.err { color: #b42318; }
+  #status.ok { color: #067647; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  th, td {
+    border: 1px solid #e2e4e8; padding: 5px 9px; text-align: left;
+    white-space: nowrap; max-width: 320px; overflow: hidden; text-overflow: ellipsis;
+  }
+  th { background: #f6f7f9; position: sticky; top: 0; }
+  #resultWrap { overflow: auto; border: 1px solid #e2e4e8; border-radius: 6px; flex: 1; min-height: 0; }
+  .meta { font-size: 12px; color: #6b7280; }
+  .item {
+    font-size: 12.5px; padding: 7px 8px; border-radius: 5px; cursor: pointer;
+    display: flex; justify-content: space-between; gap: 6px; align-items: center;
+  }
+  .item:hover { background: #f1f2f4; }
+  .item .sql { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+  .badge { font-size: 10px; padding: 1px 6px; border-radius: 10px; flex: none; }
+  .badge.succeeded { background: #d1fae5; color: #067647; }
+  .badge.failed { background: #fee2e2; color: #b42318; }
+  .badge.running, .badge.queued { background: #fef3c7; color: #92400e; }
+  #saveRow { display: none; gap: 6px; }
+  #saveRow.show { display: flex; }
+  a.dl { font-size: 12px; }
+</style>
+</head>
+<body>
+
+<aside>
+  <div>
+    <h1>🦆 Quack on demand</h1>
+    <div class="meta">SQL ad-hoc contra o lakehouse</div>
+  </div>
+
+  <div>
+    <h2>Queries salvas</h2>
+    <div id="savedList"></div>
+  </div>
+
+  <div>
+    <h2>Histórico</h2>
+    <div id="historyList"></div>
+  </div>
+</aside>
+
+<main>
+  <textarea id="sql" placeholder="select region, count(*) from fct_portfolio_revenue group by 1 order by 1"></textarea>
+
+  <div class="row">
+    <button class="primary" id="runBtn" onclick="runQuery()">Executar</button>
+    <button onclick="toggleSave()">Salvar query</button>
+    <span id="status"></span>
+  </div>
+
+  <div class="row" id="saveRow">
+    <input id="saveName" placeholder="nome da query" style="flex:1; padding:6px 9px; border:1px solid #d6d9de; border-radius:6px;">
+    <button class="primary small" onclick="saveQuery()">Salvar</button>
+  </div>
+
+  <div class="row" id="resultMeta" style="display:none">
+    <span class="meta" id="resultInfo"></span>
+    <a class="dl" id="downloadLink" href="#" target="_blank">baixar resultado completo (.parquet)</a>
+  </div>
+
+  <div id="resultWrap"></div>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let pollTimer = null;
+
+function setStatus(text, cls) {
+  const el = $("status");
+  el.textContent = text;
+  el.className = cls || "";
+}
+
+async function runQuery() {
+  const sql = $("sql").value.trim();
+  if (!sql) return;
+  clearInterval(pollTimer);
+  $("runBtn").disabled = true;
+  $("resultMeta").style.display = "none";
+  $("resultWrap").innerHTML = "";
+  setStatus("enviando...");
+
+  let resp, body;
+  try {
+    resp = await fetch("/queries", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sql }),
+    });
+    body = await resp.json();
+  } catch (e) {
+    setStatus("erro de rede: " + e, "err");
+    $("runBtn").disabled = false;
+    return;
+  }
+
+  if (!resp.ok) {
+    setStatus((body.detail && (body.detail.error || body.detail)) || "erro na submissão", "err");
+    $("runBtn").disabled = false;
+    return;
+  }
+
+  setStatus("na fila (task ECS subindo, pode levar ~30-60s)...");
+  pollStatus(body.job_id);
+  loadHistory();
+}
+
+function pollStatus(jobId) {
+  pollTimer = setInterval(async () => {
+    const resp = await fetch(`/queries/${jobId}`);
+    const s = await resp.json();
+    if (s.status === "queued") setStatus("na fila...");
+    else if (s.status === "running") setStatus("executando...");
+    else if (s.status === "succeeded") {
+      clearInterval(pollTimer);
+      renderResult(s);
+      setStatus(`sucesso — ${s.row_count} linha(s)`, "ok");
+      $("runBtn").disabled = false;
+      loadHistory();
+    } else if (s.status === "failed") {
+      clearInterval(pollTimer);
+      setStatus("falhou: " + (s.error || "erro desconhecido"), "err");
+      $("runBtn").disabled = false;
+      loadHistory();
+    }
+  }, 2000);
+}
+
+function renderResult(s) {
+  if (s.preview_error) {
+    $("resultWrap").innerHTML = `<div class="meta" style="padding:10px">prévia indisponível: ${escapeHtml(s.preview_error)}</div>`;
+  } else if (s.preview_columns) {
+    const head = s.preview_columns.map(c => `<th>${escapeHtml(c)}</th>`).join("");
+    const rows = s.preview_rows.map(r =>
+      "<tr>" + r.map(v => `<td>${v === null ? "<i>null</i>" : escapeHtml(String(v))}</td>`).join("") + "</tr>"
+    ).join("");
+    $("resultWrap").innerHTML = `<table><thead><tr>${head}</tr></thead><tbody>${rows}</tbody></table>`;
+  }
+  $("resultMeta").style.display = "flex";
+  const shown = s.preview_rows ? s.preview_rows.length : 0;
+  $("resultInfo").textContent = s.row_count > shown
+    ? `mostrando ${shown} de ${s.row_count} linhas`
+    : `${s.row_count} linha(s)`;
+  $("downloadLink").href = s.result_url;
+}
+
+function escapeHtml(str) {
+  return str.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+function toggleSave() {
+  $("saveRow").classList.toggle("show");
+}
+
+async function saveQuery() {
+  const name = $("saveName").value.trim();
+  const sql = $("sql").value.trim();
+  if (!name || !sql) return;
+  const resp = await fetch("/saved-queries", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name, sql }),
+  });
+  const body = await resp.json();
+  if (!resp.ok) {
+    alert((body.detail && body.detail) || "erro ao salvar");
+    return;
+  }
+  $("saveName").value = "";
+  $("saveRow").classList.remove("show");
+  loadSaved();
+}
+
+async function loadSaved() {
+  const resp = await fetch("/saved-queries");
+  const items = await resp.json();
+  $("savedList").innerHTML = items.map(q => `
+    <div class="item" title="${escapeHtml(q.sql)}">
+      <span class="sql" onclick='loadIntoEditor(${JSON.stringify(q.sql)})'>${escapeHtml(q.name)}</span>
+      <button class="small" onclick='runSaved(${JSON.stringify(q.name)})'>▶</button>
+    </div>
+  `).join("") || '<div class="meta">nenhuma ainda</div>';
+}
+
+function loadIntoEditor(sql) {
+  $("sql").value = sql;
+}
+
+async function runSaved(name) {
+  const resp = await fetch(`/saved-queries/${encodeURIComponent(name)}/run`, { method: "POST" });
+  const body = await resp.json();
+  if (!resp.ok) {
+    setStatus((body.detail && body.detail.error) || "erro", "err");
+    return;
+  }
+  $("resultMeta").style.display = "none";
+  $("resultWrap").innerHTML = "";
+  setStatus("na fila...");
+  clearInterval(pollTimer);
+  pollStatus(body.job_id);
+  loadHistory();
+}
+
+async function loadHistory() {
+  const resp = await fetch("/queries?limit=15");
+  const items = await resp.json();
+  $("historyList").innerHTML = items.map(q => `
+    <div class="item" onclick='reopenJob(${JSON.stringify(q.job_id)}, ${JSON.stringify(q.sql)})'>
+      <span class="sql" title="${escapeHtml(q.sql)}">${escapeHtml(q.sql)}</span>
+      <span class="badge ${q.status}">${q.status}</span>
+    </div>
+  `).join("") || '<div class="meta">nenhuma ainda</div>';
+}
+
+async function reopenJob(jobId, sql) {
+  $("sql").value = sql;
+  clearInterval(pollTimer);
+  $("resultMeta").style.display = "none";
+  $("resultWrap").innerHTML = "";
+  setStatus("carregando...");
+  const resp = await fetch(`/queries/${jobId}`);
+  const s = await resp.json();
+  if (s.status === "succeeded") {
+    renderResult(s);
+    setStatus(`sucesso — ${s.row_count} linha(s)`, "ok");
+  } else if (s.status === "failed") {
+    setStatus("falhou: " + (s.error || "erro desconhecido"), "err");
+  } else {
+    setStatus(s.status + "...");
+    pollStatus(jobId);
+  }
+}
+
+loadSaved();
+loadHistory();
+</script>
+</body>
+</html>

@@ -29,6 +29,7 @@ data "archive_file" "query_lambda" {
     "Dockerfile",
     "docker-compose.yml",
     "requirements.txt",
+    "static",
     ".env",
     ".env.example",
     "README.md",

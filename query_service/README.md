@@ -5,13 +5,19 @@ ECS Fargate task per query (same image/task definition the dbt pipeline
 uses, `MODE=query`) — no warehouse sits around idle. Full design/validation
 notes: `ARCHITECTURE.md` §9.
 
-## Local (Postgres-backed history + saved queries)
+## Local (UI, Postgres-backed history + saved queries)
 
 ```bash
 cp .env.example .env   # fill in from `terraform output` in infra/
 docker compose up -d
 ```
 
+Open http://localhost:8000 — type SQL, hit "Executar", the result renders
+as a table (first 500 rows; the full result is always downloadable as
+`.parquet`). "Salvar query" names the current SQL for one-click reruns;
+"Histórico" lists past runs, click one to reload its result.
+
+Or the same thing via `curl`:
 ```bash
 curl -X POST http://localhost:8000/queries -H 'Content-Type: application/json' \
   -d '{"sql": "select region, count(*) from fct_portfolio_revenue group by 1"}'

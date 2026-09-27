@@ -184,6 +184,7 @@ Essa etapa é necessária pois o Terraform precisa de um state permanente por is
 | `common.py` | Único lugar com o layout de chaves do S3 e o guard de SQL somente-leitura — importado tanto pelas Lambdas quanto (via `dbt/Dockerfile`) por `ingestion/query_runner.py`, ver §9 |
 | `lambda_submit.py` / `lambda_status.py` | Handlers da API na AWS (API Gateway + Lambda) |
 | `local_api.py` / `db.py` / `schema.sql` | API local (FastAPI) com Postgres pra histórico/queries salvas — ver §9.3 |
+| `static/index.html` | UI web (HTML/JS puro, sem build) servida em `GET /` pela API local — ver §9.4 |
 | `docker-compose.yml` / `.env.example` | Sobe Postgres + a API local |
 
 ### 2.6 CI/CD (`.github/workflows/`)
@@ -1205,7 +1206,33 @@ curl -X POST "$API_URL/queries" -H 'Content-Type: application/json' \
 curl "$API_URL/queries/<job_id>"
 ```
 
-### 9.4 O que foi validado
+### 9.4 Interface web (local)
+
+`query_service/local_api.py` também serve uma página em `GET /`
+(`query_service/static/index.html` — HTML/JS puro, sem build step): um
+textarea de SQL, botão "Executar", tabela de resultado, histórico e
+biblioteca de queries salvas na lateral. É só a mesma API por trás — a
+página não introduz nenhum caminho novo de execução.
+
+O único ponto que exigiu lógica nova no servidor: o resultado de uma query
+é um `.parquet` no S3, que o navegador não sabe ler sozinho. Em vez de
+carregar uma lib de parquet no JS (duckdb-wasm, etc.), o próprio
+`local_api.py` baixa o `result.parquet`, lê com DuckDB (dependência nova só
+deste container — as Lambdas continuam sem ela) e devolve até 500 linhas já
+como JSON (`preview_columns`/`preview_rows`) dentro da resposta de
+`GET /queries/{job_id}`. O front só precisa saber renderizar uma
+`<table>`; o resultado completo (todas as linhas) continua baixável via
+`result_url`, a mesma URL presignada de sempre.
+
+**Validado num navegador de verdade** (Chrome, via automação), contra a
+API local rodando de fato: SQL digitado → Executar → task ECS real sobe →
+tabela renderizada com dados reais do `gold.fct_portfolio_revenue`
+(825 clientes por região/tier, batendo com a §9.5 abaixo); SQL com `DROP`
+rejeitado na hora, com a mensagem de erro do guard aparecendo na tela sem
+disparar task nenhuma; "Salvar query" e rodar uma query salva pelo botão
+▶ da lateral, também de ponta a ponta contra a AWS real.
+
+### 9.5 O que foi validado
 
 Testado camada por camada contra a AWS real antes de escrever a infra em
 Terraform, não só depois — o mesmo padrão do resto do projeto (ex.: a
