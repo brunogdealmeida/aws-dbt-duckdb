@@ -21,6 +21,11 @@ elif mode == "dbt-build":
     cmd = ["dbt", "build"]
 elif mode == "ingest":
     cmd = [sys.executable, "-m", "ingestion.ingest_csv"]
+elif mode == "query":
+    # "Quack on demand" — runs one ad-hoc SQL query (see
+    # ingestion/query_runner.py and query_service/). Triggered per-query via
+    # ecs:RunTask container overrides, not the scheduler/deploy workflow.
+    cmd = [sys.executable, "-m", "ingestion.query_runner"]
 else:
     raise SystemExit(f"Unsupported MODE={mode}")
 

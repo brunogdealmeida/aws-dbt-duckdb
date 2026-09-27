@@ -56,6 +56,11 @@ output "dbt_logs_bucket_name" {
   value = aws_s3_bucket.dbt_logs.bucket
 }
 
+output "query_api_invoke_url" {
+  description = "Base URL of the 'quack on demand' HTTP API. POST {sql} to <this>/queries; GET <this>/queries/<job_id> for status/result."
+  value       = aws_apigatewayv2_stage.query.invoke_url
+}
+
 output "dbt_build_schedule_name" {
   description = "EventBridge Scheduler schedule that runs `dbt build` on the ECS task (only set when enable_dbt_build_schedule = true)."
   value       = var.enable_dbt_build_schedule ? aws_scheduler_schedule.dbt_build[0].name : null

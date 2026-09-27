@@ -144,6 +144,7 @@ Essa etapa é necessária pois o Terraform precisa de um state permanente por is
 | `glue_lakeformation.tf` | Role de federação, `aws_lakeformation_resource`, `aws_lakeformation_data_lake_settings`, `awscc_glue_catalog.s3tables`, `aws_lakeformation_permissions` | Torna o S3 Tables visível/consultável pelo Glue + Lake Formation |
 | `athena.tf` | Bucket de resultados, `aws_athena_workgroup`, `aws_athena_data_catalog` (nome: `datalab-duckdb`) | Consulta via Athena |
 | `scheduler.tf` | Role do EventBridge Scheduler, `aws_scheduler_schedule.dbt_build` | Roda `dbt build` todo dia às 03:00 UTC |
+| `query_service.tf` | 2 Lambdas, API Gateway HTTP API, IAM da Lambda | "Quack on demand" — API de execução de queries — ver §9 |
 | `outputs.tf` | Nomes/ARNs de tudo acima | Referência rápida (`terraform output`) |
 
 ### 2.3 dbt (`dbt/`)
@@ -174,8 +175,18 @@ Essa etapa é necessária pois o Terraform precisa de um state permanente por is
 | `simulate_portfolio_changes.py` | Reescreve o snapshot da hierarquia de carteira (clientes trocam de carteira; carteiras trocam de gerente/região) pra alimentar a SCD Tipo 2 — ver §8 |
 | `sample_data/*.csv` | Amostras pequenas e FK-consistentes, usadas pelo target `dev`/CI |
 | `sample_data/*_cdc.csv` | Lotes de CDC de exemplo (mão), usados pelo target `dev`/CI pros models incrementais |
+| `query_runner.py` | Executa uma query ad-hoc contra o S3 Tables (`MODE=query`, ver §9) e sobe status/resultado pro S3 |
 
-### 2.5 CI/CD (`.github/workflows/`)
+### 2.5 "Quack on demand" (`query_service/`)
+
+| Arquivo | Propósito |
+|---|---|
+| `common.py` | Único lugar com o layout de chaves do S3 e o guard de SQL somente-leitura — importado tanto pelas Lambdas quanto (via `dbt/Dockerfile`) por `ingestion/query_runner.py`, ver §9 |
+| `lambda_submit.py` / `lambda_status.py` | Handlers da API na AWS (API Gateway + Lambda) |
+| `local_api.py` / `db.py` / `schema.sql` | API local (FastAPI) com Postgres pra histórico/queries salvas — ver §9.3 |
+| `docker-compose.yml` / `.env.example` | Sobe Postgres + a API local |
+
+### 2.6 CI/CD (`.github/workflows/`)
 
 | Workflow | Gatilho | O que faz |
 |---|---|---|
@@ -1043,4 +1054,134 @@ O `terraform validate`/`plan` não chegou a rodar localmente (sem acesso de
 rede ao registry de providers); só `terraform fmt -check`. O plan/apply de
 verdade rodou no CI, criando 2 recursos (namespace `gold` + permissões de
 Lake Formation) sem alterar nem destruir nada.
+
+---
+
+## 9. "Quack on demand" — execução de queries sob demanda
+
+Uma API pra rodar SQL ad-hoc contra o lakehouse (silver + gold) sem precisar
+de Athena nem de um warehouse ligado 24/7: cada query sobe uma task ECS
+Fargate efêmera — a mesma imagem/task definition que o dbt já usa, só com
+`MODE=query` — que anexa o mesmo S3 Tables via DuckDB, executa, e morre.
+Nenhum compute fica esperando query nenhuma, o mesmo princípio "on demand"
+do resto da stack.
+
+### 9.1 Fluxo
+
+```text
+POST /queries {sql}
+        |
+        v
+  Lambda query-submit
+   - valida (só SELECT/WITH, um statement só)
+   - sobe o SQL pra s3://<landing>/queries/<job_id>/query.sql
+   - ecs:RunTask (MODE=query, JOB_ID, QUERY_S3_KEY) na mesma
+     task definition do dbt
+        |
+        v
+  ECS Fargate task (ingestion/query_runner.py)
+   - ATTACH no S3 Tables (mesmo credential_chain do dbt)
+   - SET search_path pra silver+gold resolverem sem prefixo
+   - COPY (query) TO result.parquet; sobe pro S3
+   - escreve status.json (running -> succeeded|failed) a cada etapa
+        |
+        v
+GET /queries/{job_id}
+        |
+        v
+  Lambda query-status
+   - lê status.json do S3 (fonte de verdade — não Postgres, não o
+     estado da task no ECS)
+   - se succeeded: devolve uma presigned URL do result.parquet
+```
+
+`status.json` — não o exit code da task nem nenhum banco — é a fonte de
+verdade. Isso é deliberado: uma query que falha (SQL invisível, tabela que
+não existe, statement rejeitado) é um resultado esperado do domínio, então
+a task sempre sai com exit 0 e a *query* fica marcada como `failed` dentro
+do próprio `status.json` (ver o comentário em `query_runner.py`).
+
+### 9.2 Por que só SELECT/WITH
+
+A API não distingue quem está chamando — qualquer principal com acesso ao
+API Gateway pode submeter uma query. Sem essa restrição, isso seria uma
+porta pra `DROP TABLE`/`DELETE` nas tabelas que o dbt constrói. O guard
+(`common.validate_read_only_sql`) roda **duas vezes**: na submissão (falha
+rápido, sem gastar uma task Fargate) e de novo dentro do `query_runner.py`
+antes de executar (caso algo chegue à task por outro caminho). Além disso,
+mesmo se o guard tivesse uma brecha, a query roda como subquery de um
+`COPY (...) TO ... (FORMAT PARQUET)` — a gramática do `COPY` não permite
+expressar um DDL/DML ali dentro.
+
+### 9.3 Onde fica cada coisa: AWS de verdade vs. local
+
+A API na AWS (API Gateway + as duas Lambdas) **não fala com Postgres** — de
+propósito, não é uma limitação temporária esquecida. Submissão e status só
+precisam de S3 + ECS, os dois diretamente alcançáveis por uma Lambda; nada
+ali depende de banco.
+
+O que **fica pendente** é onde produção guarda *histórico de execução* e
+*queries salvas* — isso pediria um Postgres alcançável pelas Lambdas (RDS,
+ou self-hosted em ECS, na mesma linha da decisão que já foi tomada pro
+Airflow) e essa decisão foi propositalmente adiada. Por enquanto, quem
+guarda isso é só o Postgres local (`query_service/docker-compose.yml`):
+
+```text
+query_service/local_api.py  (roda no seu Docker)
+        |
+        +--> mesma Lambda: ecs:RunTask contra a AWS de verdade
+        |
+        +--> Postgres local: espelha o status.json do S3 numa
+             tabela `executions` a cada poll, e guarda `saved_queries`
+```
+
+Ou seja: a *execução* é sempre 100% AWS real (mesma task, mesmos dados,
+mesmo bucket) nos dois casos — o que muda é só onde fica o metadado.
+Mesmo padrão já usado pro Airflow local orquestrando ECS real.
+
+**Como rodar:**
+```bash
+cd query_service
+cp .env.example .env        # preenche com `terraform output` de infra/
+docker compose up -d
+curl -X POST http://localhost:8000/queries -H 'Content-Type: application/json' \
+  -d '{"sql": "select region, count(*) from fct_portfolio_revenue group by 1"}'
+curl http://localhost:8000/queries/<job_id>
+curl http://localhost:8000/queries              # histórico (Postgres)
+curl -X POST http://localhost:8000/saved-queries -d '{"name":"x","sql":"select 1"}'
+curl -X POST http://localhost:8000/saved-queries/x/run
+```
+
+**Direto na AWS** (depois do `terraform apply` que cria a API — ver
+`terraform output query_api_invoke_url`):
+```bash
+curl -X POST "$API_URL/queries" -H 'Content-Type: application/json' \
+  -d '{"sql": "select count(*) from silver.orders"}'
+curl "$API_URL/queries/<job_id>"
+```
+
+### 9.4 O que foi validado
+
+Testado camada por camada contra a AWS real antes de escrever a infra em
+Terraform, não só depois — o mesmo padrão do resto do projeto (ex.: a
+limitação do `MERGE INTO` do Iceberg, §3.17, também foi confirmada assim
+antes do macro existir):
+
+| peça | como foi testado | resultado |
+|---|---|---|
+| `attach_lakehouse()` isolado | `duckdb.connect()` direto contra o bucket real | `USE s3_tables` sozinho falha (`SET schema: No catalog + schema named "s3_tables" found`); `SET search_path='s3_tables.silver,s3_tables.gold'` funciona e resolve `silver.orders`/`fct_portfolio_revenue` sem prefixo |
+| `validate_read_only_sql` | 10 casos (SELECT/WITH/comentários/CTE aceitos; DROP/DELETE/INSERT/`;`-duplo/vazio rejeitados) | 10/10 |
+| `query_runner.run()` isolado | rodado direto (fora do ECS) contra o bucket real | query real (`group by` no gold) executada, `status.json`+`result.parquet` corretos; query com `DROP` rejeitada sem tocar em nada |
+| A mesma imagem Docker que vai pro ECR | `docker build` + `docker run MODE=query` com as credenciais reais | idêntico ao teste isolado — prova que o `Dockerfile` novo (com `query_service/common.py` copiado) empacota certo |
+| `lambda_submit`/`lambda_status` isolados | chamados direto (fora do API Gateway) com `ecs:RunTask` real contra o cluster real | submissão sem SQL/SQL proibido rejeitada **sem** chamar `ecs:RunTask`; SQL válido efetivamente sobe uma task real |
+| Terraform (`query_service.tf` + o resto) | `terraform validate` + `terraform plan` contra o state remoto real | válido; plano limpo — 13 recursos novos, 1 alterado (lifecycle do bucket), 0 destruídos |
+| API local (`docker compose up`) | `curl` contra os 6 endpoints | submissão, histórico (Postgres), queries salvas (criar/listar/rodar/rejeitar DDL/rejeitar nome duplicado) — todos OK |
+
+**Round-trip completo (submissão -> task real -> resultado), na hora em
+que este parágrafo foi escrito, ainda não tinha sido feito** — só depois
+do primeiro `terraform apply` + deploy da imagem nova (a task definition
+em produção ainda não tem `MODE=query`; confirmado tentando: a task sobe e
+morre com `Unsupported MODE=query`, porque a imagem publicada é a de
+antes desta feature). Fica como próximo passo assim que a imagem nova for
+publicada.
 

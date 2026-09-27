@@ -1,0 +1,53 @@
+# "Quack on demand", local stack — the API here submits real queries to the
+# real ECS Fargate task against real S3 Tables data (same pattern as the
+# local Airflow setup driving real ECS tasks — see ARCHITECTURE.md); only
+# the metadata store (Postgres) is local. Fill in query_service/.env first
+# (see .env.example) with the values `terraform output` prints in infra/.
+#
+#   docker compose up -d      # start Postgres + the API
+#   docker compose down       # stop (add -v to also wipe Postgres data)
+#
+# API: http://localhost:8000 — try http://localhost:8000/docs for the
+# interactive Swagger UI FastAPI generates for free.
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: quack
+      POSTGRES_PASSWORD: quack
+      POSTGRES_DB: quack
+    volumes:
+      - quack-postgres-data:/var/lib/postgresql/data
+      - ./schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "quack"]
+      interval: 5s
+      retries: 10
+    ports:
+      - "5432:5432"
+
+  api:
+    build:
+      context: .
+    environment:
+      DATABASE_URL: postgresql://quack:quack@postgres:5432/quack
+      LANDING_BUCKET: ${LANDING_BUCKET}
+      ECS_CLUSTER: ${ECS_CLUSTER}
+      ECS_TASK_DEFINITION_FAMILY: ${ECS_TASK_DEFINITION_FAMILY}
+      ECS_SUBNETS: ${ECS_SUBNETS}
+      ECS_SECURITY_GROUPS: ${ECS_SECURITY_GROUPS}
+      ECS_CONTAINER_NAME: ${ECS_CONTAINER_NAME:-lakehouse}
+      ECS_ASSIGN_PUBLIC_IP: ${ECS_ASSIGN_PUBLIC_IP:-ENABLED}
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+      AWS_SHARED_CREDENTIALS_FILE: /root/.aws/credentials
+      AWS_CONFIG_FILE: /root/.aws/config
+    volumes:
+      - ~/.aws:/root/.aws:ro
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  quack-postgres-data:

@@ -42,6 +42,12 @@ variable "dbt_logs_retention_days" {
   default     = 90
 }
 
+variable "query_results_retention_days" {
+  description = "Days to retain 'quack on demand' query artifacts (queries/<job_id>/*) in the landing bucket before automatic expiration."
+  type        = number
+  default     = 7
+}
+
 variable "container_cpu" {
   type    = number
   default = 2048

@@ -44,6 +44,23 @@ resource "aws_s3_bucket_lifecycle_configuration" "landing" {
       noncurrent_days = 90
     }
   }
+
+  # "Quack on demand" query artifacts (queries/<job_id>/{query.sql,
+  # status.json, result.parquet} — see query_service.tf / ingestion/
+  # query_runner.py) accumulate one object set per query with no other
+  # cleanup mechanism, unlike bronze/ which dbt just re-reads in place.
+  rule {
+    id     = "expire-query-artifacts"
+    status = "Enabled"
+
+    filter {
+      prefix = "queries/"
+    }
+
+    expiration {
+      days = var.query_results_retention_days
+    }
+  }
 }
 
 # dbt's own log files (dbt/logs/dbt.log, distinct from the stdout/stderr

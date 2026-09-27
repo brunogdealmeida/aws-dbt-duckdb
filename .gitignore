@@ -8,6 +8,7 @@ infra/bootstrap/.terraform/
 *.tfstate.*
 *.tfplan
 tfplan
+infra/.query_lambda.zip
 crash.log
 infra/backend.hcl
 infra/terraform.tfvars
@@ -39,3 +40,8 @@ airflow/home/
 airflow/docker-logs/
 airflow/docker-plugins/
 airflow/.env
+
+# Local "quack on demand" stack (query_service/docker-compose.yml) — the
+# same real-vs-local-config split as airflow/.env above.
+query_service/.env
+query_service/__pycache__/
