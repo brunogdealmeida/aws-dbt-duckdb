@@ -69,6 +69,24 @@ resource "aws_iam_role_policy" "query_lambda" {
         Resource = ["arn:aws:s3:::${var.landing_bucket_name}/queries/*"]
       },
       {
+        Sid      = "QueryArtifactsExistenceCheck"
+        Effect   = "Allow"
+        Action   = ["s3:ListBucket"]
+        Resource = ["arn:aws:s3:::${var.landing_bucket_name}"]
+        Condition = {
+          StringLike = { "s3:prefix" = ["queries/*"] }
+        }
+        # lambda_status.py's GetObject on status.json before the ECS task
+        # has written it (still "queued") isn't an error, but S3 can't tell
+        # this role that without ListBucket: a GetObject on a MISSING key
+        # returns 403 AccessDenied instead of 404 NotFound when the caller
+        # lacks ListBucket on the bucket — confirmed directly, hitting
+        # exactly this on the very first real request through the deployed
+        # API (poll right after submission, before the task had run) —
+        # lambda_status.py's `except` only matched 404/NoSuchKey/NotFound,
+        # so the 403 it got instead propagated as an unhandled 500.
+      },
+      {
         Sid      = "RunQueryTask"
         Effect   = "Allow"
         Action   = ["ecs:RunTask"]

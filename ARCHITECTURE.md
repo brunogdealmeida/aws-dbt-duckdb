@@ -614,6 +614,29 @@ uploaded" — sem erro nenhum, o segundo arquivo foi descartado em silêncio,
 e o `apply` falhou exatamente como antes da primeira tentativa de correção.
 **Correção:** `include-hidden-files: true` no step de `upload-artifact`.
 
+### 3.26 `GetObject` num objeto inexistente devolve 403, não 404, sem `s3:ListBucket`
+
+**Sintoma:** achado na primeira query de verdade pela API já publicada —
+`GET /queries/<job_id>` devolveu `{"message": "Internal Server Error"}` no
+primeiro poll (logo após a submissão, antes da task ECS terminar); o
+segundo poll, ~8s depois, funcionou normal.
+**Causa:** `lambda_status.py` trata "status.json ainda não existe" (task
+ainda rodando) como caminho normal — captura `ClientError` e checa o código
+`404`/`NoSuchKey`/`NotFound`. Mas o log do CloudWatch mostrou
+`AccessDenied: ... not authorized to perform: s3:ListBucket`, não um 404.
+Comportamento documentado do S3, não um bug do SDK: um `GetObject` numa
+chave que **não existe** devolve **403 AccessDenied** em vez de **404
+NotFound** quando quem chama não tem `s3:ListBucket` no bucket — o S3 não
+revela se o objeto existe pra quem não pode listar o bucket. A policy da
+Lambda só tinha `s3:GetObject`/`s3:PutObject` (escopo objeto, em
+`.../queries/*`), sem `s3:ListBucket` (escopo bucket) — então todo poll que
+chegasse antes do `status.json` existir batia num 403 que o `except` não
+esperava, e virava um 500 sem tratamento.
+**Correção:** adicionado `s3:ListBucket` na policy da Lambda, restrito ao
+bucket (`Resource` sem `/*`) com uma `Condition` (`s3:prefix =
+"queries/*"`) — dá pra Lambda listar objetos, mas só dentro do prefixo que
+já podia ler/escrever, sem abrir visibilidade do resto do bucket.
+
 ---
 
 ## 4. Como renomear buckets / namespace / catálogo do Athena
@@ -1197,14 +1220,14 @@ antes do macro existir):
 | A mesma imagem Docker que vai pro ECR | `docker build` + `docker run MODE=query` com as credenciais reais | idêntico ao teste isolado — prova que o `Dockerfile` novo (com `query_service/common.py` copiado) empacota certo |
 | `lambda_submit`/`lambda_status` isolados | chamados direto (fora do API Gateway) com `ecs:RunTask` real contra o cluster real | submissão sem SQL/SQL proibido rejeitada **sem** chamar `ecs:RunTask`; SQL válido efetivamente sobe uma task real |
 | Terraform (`query_service.tf` + o resto) | `terraform validate` + `terraform plan` local contra o state remoto real | válido; plano limpo — 13 recursos novos, 1 alterado (lifecycle do bucket), 0 destruídos |
-| `terraform apply` de verdade, via CI | push a `main` | 1ª tentativa falhou — job de `apply` não achava o zip da Lambda, criado só no job de `plan` (§3.25); corrigido e reaplicado |
+| `terraform apply` de verdade, via CI | push a `main` | falhou duas vezes (§3.25 — o zip nem chegava no job de `apply`, depois `upload-artifact` descartando arquivo oculto); na 3ª, limpo: 8 recursos criados, 0 alterados, 0 destruídos (os outros 5 dos 13 originais já tinham subido na 1ª tentativa, antes de travar nos dois Lambdas) |
+| Round-trip completo, direto na API publicada | `POST /queries` real no `query_api_invoke_url`, `GET /queries/<job_id>` até fechar | 1º poll (logo após a submissão) devolveu 500 — achou o bug do §3.26 (403 em vez de 404 sem `s3:ListBucket`); 2º poll, `succeeded`, com `result_url` presignado funcional |
 | API local (`docker compose up`) | `curl` contra os 6 endpoints | submissão, histórico (Postgres), queries salvas (criar/listar/rodar/rejeitar DDL/rejeitar nome duplicado) — todos OK |
 
-**Round-trip completo (submissão -> task real -> resultado), na hora em
-que este parágrafo foi escrito, ainda não tinha sido feito** — só depois
-do primeiro `terraform apply` + deploy da imagem nova (a task definition
-em produção ainda não tem `MODE=query`; confirmado tentando: a task sobe e
-morre com `Unsupported MODE=query`, porque a imagem publicada é a de
-antes desta feature). Fica como próximo passo assim que a imagem nova for
-publicada.
+Ou seja: o round-trip completo (submissão → task ECS real com a imagem
+nova → `status.json`/`result.parquet` no S3 → resposta da API com URL
+presignada) está provado de ponta a ponta contra a AWS de produção — e foi
+exatamente esse teste real, não uma leitura de código, que achou o bug do
+`s3:ListBucket` (§3.26), que só aparece na janela entre "query submetida" e
+"task ainda não escreveu status.json".
 
