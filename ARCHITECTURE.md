@@ -598,16 +598,21 @@ população de clientes mudar.
 ./.query_lambda.zip: no such file or directory`, ao aplicar
 `infra/query_service.tf` — mesmo o `terraform plan` (rodado momentos antes,
 no job anterior) tendo terminado sem erro.
-**Causa:** `data "archive_file"` (usado pra empacotar as Lambdas do "quack
-on demand" sem precisar de passo de build — ver §9) escreve o zip no disco
-como *efeito colateral* de avaliar a própria data source, durante o
-`terraform plan`. `.github/workflows/terraform.yml` roda `plan` e `apply`
-como **jobs separados** — cada um numa VM (runner) nova — e só
-`infra/tfplan` era transferido de um pro outro via
-upload/download-artifact. O zip, escrito só no disco do runner do `plan`,
-simplesmente não existia mais quando o `apply` rodava, numa VM diferente.
-**Correção:** o `upload-artifact`/`download-artifact` do workflow agora
-levam `infra/.query_lambda.zip` junto com `infra/tfplan`.
+**Causa (dois bugs em sequência):** `data "archive_file"` (usado pra
+empacotar as Lambdas do "quack on demand" sem precisar de passo de build —
+ver §9) escreve o zip no disco como *efeito colateral* de avaliar a própria
+data source, durante o `terraform plan`. `.github/workflows/terraform.yml`
+roda `plan` e `apply` como **jobs separados** — cada um numa VM (runner)
+nova — e só `infra/tfplan` era transferido de um pro outro via
+upload/download-artifact; o zip, escrito só no disco do runner do `plan`,
+simplesmente não existia mais no do `apply`. Adicionar
+`infra/.query_lambda.zip` na mesma lista de `path` do `upload-artifact`
+**não resolveu** — o log revelou o segundo bug: `actions/upload-artifact@v4`
+**ignora arquivos ocultos por padrão** (`include-hidden-files: false`), e
+`.query_lambda.zip` começa com ponto. O log dizia só "there will be 1 file
+uploaded" — sem erro nenhum, o segundo arquivo foi descartado em silêncio,
+e o `apply` falhou exatamente como antes da primeira tentativa de correção.
+**Correção:** `include-hidden-files: true` no step de `upload-artifact`.
 
 ---
 

@@ -83,6 +83,12 @@ jobs:
           path: |
             infra/tfplan
             infra/.query_lambda.zip
+          # actions/upload-artifact@v4 excludes dotfiles by default — without
+          # this, .query_lambda.zip is silently dropped ("there will be 1
+          # file uploaded" in the log, no error) and apply fails the same
+          # way as before this whole fix. Confirmed by hitting exactly this
+          # on the first attempt at the fix above.
+          include-hidden-files: true
           retention-days: 5
 
   apply:
