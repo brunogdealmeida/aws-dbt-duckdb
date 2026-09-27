@@ -72,7 +72,17 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: tfplan
-          path: infra/tfplan
+          # .query_lambda.zip alongside tfplan: `data.archive_file` (see
+          # infra/query_service.tf) writes that zip to local disk as a
+          # side effect of `terraform plan`, and the apply job below runs
+          # on a separate, fresh runner — without it too, `apply` fails
+          # with "no such file or directory" trying to read a zip that was
+          # only ever written to the plan job's now-gone filesystem.
+          # Confirmed by hitting exactly this the first time this resource
+          # was added.
+          path: |
+            infra/tfplan
+            infra/.query_lambda.zip
           retention-days: 5
 
   apply:

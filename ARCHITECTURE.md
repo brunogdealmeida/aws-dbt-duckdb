@@ -592,6 +592,23 @@ rodada seguida, e por isso o script passou a ser testado com 8 rodadas
 encadeadas, em que dá pra ver as carteiras encolhendo (490 -> 482) sem a
 população de clientes mudar.
 
+### 3.25 `terraform apply` não achava o zip da Lambda (job de apply roda numa VM diferente do job de plan)
+
+**Sintoma:** `Error: reading ZIP file (./.query_lambda.zip): open
+./.query_lambda.zip: no such file or directory`, ao aplicar
+`infra/query_service.tf` — mesmo o `terraform plan` (rodado momentos antes,
+no job anterior) tendo terminado sem erro.
+**Causa:** `data "archive_file"` (usado pra empacotar as Lambdas do "quack
+on demand" sem precisar de passo de build — ver §9) escreve o zip no disco
+como *efeito colateral* de avaliar a própria data source, durante o
+`terraform plan`. `.github/workflows/terraform.yml` roda `plan` e `apply`
+como **jobs separados** — cada um numa VM (runner) nova — e só
+`infra/tfplan` era transferido de um pro outro via
+upload/download-artifact. O zip, escrito só no disco do runner do `plan`,
+simplesmente não existia mais quando o `apply` rodava, numa VM diferente.
+**Correção:** o `upload-artifact`/`download-artifact` do workflow agora
+levam `infra/.query_lambda.zip` junto com `infra/tfplan`.
+
 ---
 
 ## 4. Como renomear buckets / namespace / catálogo do Athena
@@ -1174,7 +1191,8 @@ antes do macro existir):
 | `query_runner.run()` isolado | rodado direto (fora do ECS) contra o bucket real | query real (`group by` no gold) executada, `status.json`+`result.parquet` corretos; query com `DROP` rejeitada sem tocar em nada |
 | A mesma imagem Docker que vai pro ECR | `docker build` + `docker run MODE=query` com as credenciais reais | idêntico ao teste isolado — prova que o `Dockerfile` novo (com `query_service/common.py` copiado) empacota certo |
 | `lambda_submit`/`lambda_status` isolados | chamados direto (fora do API Gateway) com `ecs:RunTask` real contra o cluster real | submissão sem SQL/SQL proibido rejeitada **sem** chamar `ecs:RunTask`; SQL válido efetivamente sobe uma task real |
-| Terraform (`query_service.tf` + o resto) | `terraform validate` + `terraform plan` contra o state remoto real | válido; plano limpo — 13 recursos novos, 1 alterado (lifecycle do bucket), 0 destruídos |
+| Terraform (`query_service.tf` + o resto) | `terraform validate` + `terraform plan` local contra o state remoto real | válido; plano limpo — 13 recursos novos, 1 alterado (lifecycle do bucket), 0 destruídos |
+| `terraform apply` de verdade, via CI | push a `main` | 1ª tentativa falhou — job de `apply` não achava o zip da Lambda, criado só no job de `plan` (§3.25); corrigido e reaplicado |
 | API local (`docker compose up`) | `curl` contra os 6 endpoints | submissão, histórico (Postgres), queries salvas (criar/listar/rodar/rejeitar DDL/rejeitar nome duplicado) — todos OK |
 
 **Round-trip completo (submissão -> task real -> resultado), na hora em
