@@ -623,6 +623,17 @@ uploaded" — sem erro nenhum, o segundo arquivo foi descartado em silêncio,
 e o `apply` falhou exatamente como antes da primeira tentativa de correção.
 **Correção:** `include-hidden-files: true` no step de `upload-artifact`.
 
+**Reaberto (§10):** listar `infra/.query_lambda.zip` nominalmente no
+`path` do `upload-artifact` era, em si, uma terceira fragilidade — ao
+adicionar `table_admin.tf` com o mesmo padrão (`data.archive_file`), o
+zip novo (`.table_admin_lambda.zip`) não estava na lista, e o `apply`
+falhou de novo com o mesmo "no such file or directory". **Correção
+definitiva:** todo `output_path` de `archive_file` em `infra/` passou a
+não começar com ponto (`query_lambda.zip`, `table_admin_lambda.zip`,
+...), e o `upload-artifact` usa um glob (`infra/*_lambda.zip`) em vez de
+nomear cada arquivo — um `archive_file` novo passa a funcionar sem
+precisar tocar no workflow.
+
 ### 3.26 `GetObject` num objeto inexistente devolve 403, não 404, sem `s3:ListBucket`
 
 **Sintoma:** achado na primeira query de verdade pela API já publicada —

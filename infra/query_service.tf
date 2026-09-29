@@ -14,9 +14,13 @@
 # both directly reachable from Lambda.
 
 data "archive_file" "query_lambda" {
-  type        = "zip"
-  source_dir  = "${path.module}/../query_service"
-  output_path = "${path.module}/.query_lambda.zip"
+  type       = "zip"
+  source_dir = "${path.module}/../query_service"
+  # No leading dot: the plan/apply CI split (see terraform.yml) carries
+  # every *_lambda.zip in infra/ between jobs by glob, and a dotted name
+  # would need extra handling to survive that (GitHub Actions artifact
+  # uploads drop hidden files by default — see ARCHITECTURE.md §3.25).
+  output_path = "${path.module}/query_lambda.zip"
 
   # Local-only pieces of the query_service directory (Postgres-backed API,
   # its Docker image, dev config) — irrelevant to the Lambda handlers and

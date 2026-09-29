@@ -8,7 +8,7 @@ infra/bootstrap/.terraform/
 *.tfstate.*
 *.tfplan
 tfplan
-infra/.query_lambda.zip
+infra/*_lambda.zip
 crash.log
 infra/backend.hcl
 infra/terraform.tfvars

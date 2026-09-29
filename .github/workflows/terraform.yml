@@ -72,23 +72,24 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: tfplan
-          # .query_lambda.zip alongside tfplan: `data.archive_file` (see
-          # infra/query_service.tf) writes that zip to local disk as a
-          # side effect of `terraform plan`, and the apply job below runs
-          # on a separate, fresh runner — without it too, `apply` fails
-          # with "no such file or directory" trying to read a zip that was
-          # only ever written to the plan job's now-gone filesystem.
-          # Confirmed by hitting exactly this the first time this resource
-          # was added.
+          # *_lambda.zip alongside tfplan: every `data.archive_file` in
+          # infra/ (query_service.tf, table_admin.tf, and any added later)
+          # writes its zip to local disk as a side effect of `terraform
+          # plan`, and the apply job below runs on a separate, fresh
+          # runner — without these too, `apply` fails with "no such file
+          # or directory" trying to read a zip that only ever existed on
+          # the plan job's now-gone filesystem. A glob here (rather than
+          # naming each zip) is the point: naming them one by one is
+          # exactly what broke the first time a second archive_file
+          # (table_admin.tf) was added and this list wasn't updated to
+          # match. The output_path of every such data source is named
+          # without a leading dot specifically so this glob (and
+          # actions/upload-artifact's default dotfile exclusion) doesn't
+          # need special-casing — see the output_path comments in
+          # query_service.tf / table_admin.tf.
           path: |
             infra/tfplan
-            infra/.query_lambda.zip
-          # actions/upload-artifact@v4 excludes dotfiles by default — without
-          # this, .query_lambda.zip is silently dropped ("there will be 1
-          # file uploaded" in the log, no error) and apply fails the same
-          # way as before this whole fix. Confirmed by hitting exactly this
-          # on the first attempt at the fix above.
-          include-hidden-files: true
+            infra/*_lambda.zip
           retention-days: 5
 
   apply:

@@ -11,9 +11,11 @@
 # benefit over "upload and check the report a moment later."
 
 data "archive_file" "table_admin_lambda" {
-  type        = "zip"
-  source_dir  = "${path.module}/../table_admin"
-  output_path = "${path.module}/.table_admin_lambda.zip"
+  type       = "zip"
+  source_dir = "${path.module}/../table_admin"
+  # No leading dot — see the comment on the equivalent line in
+  # query_service.tf.
+  output_path = "${path.module}/table_admin_lambda.zip"
 }
 
 resource "aws_iam_role" "table_admin_lambda" {
