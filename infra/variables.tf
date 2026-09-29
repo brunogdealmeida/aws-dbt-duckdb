@@ -48,6 +48,12 @@ variable "query_results_retention_days" {
   default     = 7
 }
 
+variable "table_rename_artifacts_retention_days" {
+  description = "Days to retain batch table-rename CSVs and their results/*.json reports (table-renames/*) in the landing bucket before automatic expiration."
+  type        = number
+  default     = 30
+}
+
 variable "container_cpu" {
   type    = number
   default = 2048

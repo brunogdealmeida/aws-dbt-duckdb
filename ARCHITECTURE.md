@@ -145,6 +145,7 @@ Essa etapa é necessária pois o Terraform precisa de um state permanente por is
 | `athena.tf` | Bucket de resultados, `aws_athena_workgroup`, `aws_athena_data_catalog` (nome: `datalab-duckdb`) | Consulta via Athena |
 | `scheduler.tf` | Role do EventBridge Scheduler, `aws_scheduler_schedule.dbt_build` | Roda `dbt build` todo dia às 03:00 UTC |
 | `query_service.tf` | 2 Lambdas, API Gateway HTTP API, IAM da Lambda | "Quack on demand" — API de execução de queries — ver §9 |
+| `table_admin.tf` | 1 Lambda, `aws_s3_bucket_notification`, IAM da Lambda | Rename em lote de tabelas do S3 Tables via CSV — ver §10 |
 | `outputs.tf` | Nomes/ARNs de tudo acima | Referência rápida (`terraform output`) |
 
 ### 2.3 dbt (`dbt/`)
@@ -187,7 +188,14 @@ Essa etapa é necessária pois o Terraform precisa de um state permanente por is
 | `static/index.html` | UI web (HTML/JS puro, sem build) servida em `GET /` pela API local — ver §9.4 |
 | `docker-compose.yml` / `.env.example` | Sobe Postgres + a API local |
 
-### 2.6 CI/CD (`.github/workflows/`)
+### 2.6 Renomear tabelas em lote (`table_admin/`)
+
+| Arquivo | Propósito |
+|---|---|
+| `rename_tables.py` | Lê o CSV, chama `s3tables:RenameTable` linha a linha — usável direto por CLI ou importado pela Lambda. Ver §10 |
+| `lambda_handler.py` | Handler disparado por evento S3 (CSV em `table-renames/*.csv`) |
+
+### 2.7 CI/CD (`.github/workflows/`)
 
 | Workflow | Gatilho | O que faz |
 |---|---|---|
@@ -687,6 +695,10 @@ gerar o `tfvars.json` do CI).
   (`+schema` em `dbt_project.yml` também lê `S3_TABLES_NAMESPACE`). Se
   mudar, as tabelas antigas continuam no namespace antigo; rode
   `dbt build --target prod` de novo pra criar as tabelas no namespace novo.
+
+Isso tudo é pra renomear **bucket/namespace/catálogo** (via Terraform). Pra
+renomear/mover **tabelas individuais** dentro de um namespace — sem
+recriar nada, sem tocar nos dados — ver §10.
 
 ---
 
@@ -1257,4 +1269,116 @@ presignada) está provado de ponta a ponta contra a AWS de produção — e foi
 exatamente esse teste real, não uma leitura de código, que achou o bug do
 `s3:ListBucket` (§3.26), que só aparece na janela entre "query submetida" e
 "task ainda não escreveu status.json".
+
+---
+
+## 10. Renomear tabelas do S3 Tables em lote (`table_admin/`)
+
+Ferramenta pequena e separada do "quack on demand": renomeia/move tabelas
+individuais do S3 Tables via `s3tables:RenameTable` — a mesma operação de
+catálogo usada manualmente em `aws s3tables rename-table` (§4 é sobre
+renomear bucket/namespace/catálogo inteiros via Terraform; isto aqui é
+sobre renomear **tabelas dentro de um namespace**, sem tocar nos dados).
+
+### 10.1 Fluxo
+
+```text
+CSV com as instruções de rename
+        |
+        v
+s3://<landing bucket>/table-renames/<qualquer-nome>.csv
+        |
+        v (evento S3 ObjectCreated, prefix table-renames/, suffix .csv)
+Lambda aws-duckdb-lakehouse-dev-table-rename
+   - lê o CSV
+   - pra cada linha: s3tables:RenameTable
+   - escreve o resultado linha a linha
+        |
+        v
+s3://<landing bucket>/table-renames/results/<nome-do-csv>.json
+```
+
+Mesmo padrão "solta um arquivo, algo reage" que o resto do projeto já usa
+(`bronze/` → fontes do dbt, `queries/` → o executor de query do §9) — não
+é uma API HTTP porque não tem nada que o chamador precise de volta na
+hora; um trigger via evento é suficiente e mais simples que mais uma API
+Gateway.
+
+### 10.2 Formato do CSV
+
+Cabeçalho obrigatório: `namespace,name,new_namespace,new_name`
+
+| coluna | obrigatório | efeito se vazio |
+|---|---|---|
+| `namespace`, `name` | sim | linha é ignorada (`skipped`) |
+| `new_namespace` | não | mantém a tabela no mesmo namespace |
+| `new_name` | não | mantém o mesmo nome (só move de namespace) |
+
+Pelo menos uma de `new_namespace`/`new_name` precisa estar preenchida —
+linha com as duas vazias também é `skipped` (nada a fazer).
+
+```csv
+namespace,name,new_namespace,new_name
+silver,pedidos_antigo,,orders
+bronze_staging,clientes,silver,
+```
+
+### 10.3 Uso
+
+**Manual/local** (mesmo script que a Lambda usa, `table_admin/rename_tables.py`):
+```bash
+python -m table_admin.rename_tables --csv renames.csv \
+  --table-bucket-arn $(terraform -chdir=infra output -raw s3_tables_bucket_arn) \
+  --dry-run              # valida e mostra o que faria, sem chamar a API
+
+python -m table_admin.rename_tables --csv renames.csv \
+  --table-bucket-arn $(terraform -chdir=infra output -raw s3_tables_bucket_arn)
+```
+Sai com código 1 se qualquer linha falhar — dá pra usar em CI/script sem
+precisar parsear a saída.
+
+**Via Lambda** — só subir o CSV:
+```bash
+aws s3 cp renames.csv $(terraform -chdir=infra output -raw table_rename_upload_prefix)
+# alguns segundos depois:
+aws s3 cp s3://<landing bucket>/table-renames/results/renames.csv.json -
+```
+
+### 10.4 Por que isso é seguro de rodar (e o que NÃO é seguro)
+
+- **Não toca em dado nenhum** — `RenameTable` só move a entrada no
+  catálogo do S3 Tables; é a mesma tabela Iceberg, mesmos arquivos
+  parquet/manifests, só o nome/namespace no catálogo muda. Confirmado
+  criando uma tabela de teste, renomeando, e lendo os dados de volta pelo
+  nome novo — linha idêntica, nada perdido.
+- Cada linha falha **de forma isolada** (`status: "failed"`, com o erro da
+  API) — uma tabela inexistente numa linha não trava as outras linhas do
+  mesmo CSV. Confirmado com um CSV de 4 linhas misturando sucesso, linha
+  inválida (sem `name`), linha sem nada pra renomear, e uma tabela
+  inexistente — as duas válidas renomearam, a inválida foi pulada, a
+  inexistente falhou com `NotFoundException` no relatório, sem afetar as
+  outras.
+- **O que isso NÃO protege**: renomear uma tabela que o dbt gerencia
+  (qualquer coisa materializada por um model em `dbt/models/`) tira ela de
+  baixo do nome/schema que o model espera — o próximo `dbt build` não acha
+  a tabela ali e tenta recriar do zero (ver o aviso em
+  `table_admin/rename_tables.py`). A ferramenta não sabe quais tabelas o
+  dbt gerencia e não bloqueia isso — quem sobe o CSV precisa saber o que
+  está renomeando.
+
+### 10.5 O que foi validado
+
+Testado direto contra o S3 Tables real, não só lido no código:
+
+| peça | como | resultado |
+|---|---|---|
+| `aws s3tables rename-table` (CLI, manual) | criei uma tabela de teste, renomeei, confirmei dado íntegro no nome novo e que o nome antigo sumiu do catálogo | ✅ |
+| `rename_tables.py --dry-run` | CSV de 4 linhas (sucesso, sem dados pra mudar, tabela inexistente, linha sem `name`) | ✅ nenhuma chamada real à API, log mostra o que faria |
+| `rename_tables.py` (execução real) | mesmo CSV, sem `--dry-run`, contra tabelas de teste reais | ✅ 2 renomeadas, 1 falhou isolada (`NotFoundException`), 1 pulada — `list-tables` confirma os nomes novos |
+| `lambda_handler.handler()` | invocado direto com um evento S3 simulado, apontando pro CSV real no bucket | ✅ renomeou as duas tabelas de volta e escreveu `table-renames/results/<csv>.json` com o relatório certo |
+| Terraform (`table_admin.tf` + lifecycle do bucket) | `terraform validate` + `terraform plan` contra o state remoto real | válido; plano limpo — 6 recursos novos, 1 alterado (lifecycle), 0 destruídos |
+
+Tabelas e objetos de teste (`silver.admin_probe_a/b`, `table-renames/*`)
+foram removidos depois de cada validação — nada de teste ficou no bucket
+real.
 

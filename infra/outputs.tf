@@ -61,6 +61,11 @@ output "query_api_invoke_url" {
   value       = aws_apigatewayv2_stage.query.invoke_url
 }
 
+output "table_rename_upload_prefix" {
+  description = "Drop a rename-instructions CSV here to trigger a batch S3 Tables rename — see table_admin/rename_tables.py for the CSV format."
+  value       = "s3://${aws_s3_bucket.landing.bucket}/table-renames/"
+}
+
 output "dbt_build_schedule_name" {
   description = "EventBridge Scheduler schedule that runs `dbt build` on the ECS task (only set when enable_dbt_build_schedule = true)."
   value       = var.enable_dbt_build_schedule ? aws_scheduler_schedule.dbt_build[0].name : null

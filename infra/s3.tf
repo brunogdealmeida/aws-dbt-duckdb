@@ -61,6 +61,22 @@ resource "aws_s3_bucket_lifecycle_configuration" "landing" {
       days = var.query_results_retention_days
     }
   }
+
+  # Batch table-rename CSVs and their results/*.json reports (see
+  # table_admin.tf / table_admin/) — these are audit records of a
+  # destructive-ish operation, so a longer retention than query artifacts.
+  rule {
+    id     = "expire-table-rename-artifacts"
+    status = "Enabled"
+
+    filter {
+      prefix = "table-renames/"
+    }
+
+    expiration {
+      days = var.table_rename_artifacts_retention_days
+    }
+  }
 }
 
 # dbt's own log files (dbt/logs/dbt.log, distinct from the stdout/stderr
