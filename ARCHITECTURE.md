@@ -1418,4 +1418,8 @@ faltava. Só testar a Lambda **implantada de verdade**, disparada pelo
 gatilho real (evento S3, não invocação manual), rodando sob a IAM role
 real, revelou o problema.
 **Correção:** `Resource = "${aws_s3tables_table_bucket.lakehouse.arn}/table/*"`.
+**Reverificado** exatamente do mesmo jeito que achou o bug — subindo outro
+CSV real em `table-renames/` e deixando o evento disparar sozinho: dessa
+vez o relatório veio `"status": "renamed"`, e `list-tables` confirmou o
+nome novo no catálogo.
 
