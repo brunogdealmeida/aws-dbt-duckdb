@@ -55,10 +55,18 @@ resource "aws_iam_role_policy" "table_admin_lambda" {
         Resource = ["arn:aws:s3:::${var.landing_bucket_name}/table-renames/results/*"]
       },
       {
-        Sid      = "RenameTables"
-        Effect   = "Allow"
-        Action   = ["s3tables:RenameTable"]
-        Resource = aws_s3tables_table_bucket.lakehouse.arn
+        Sid    = "RenameTables"
+        Effect = "Allow"
+        Action = ["s3tables:RenameTable"]
+        # s3tables:RenameTable authorizes against the *table* resource
+        # (.../bucket/<name>/table/<uuid>), not the table bucket itself —
+        # confirmed by hitting AccessDeniedException on this exact action
+        # when the Resource here was just the bucket ARN, via the real
+        # deployed Lambda triggered by a real S3 upload (not a local test
+        # — the table_bucket_arn-only version passed every local/manual
+        # test because those ran with the terraform-admin user's broad
+        # permissions, not this role's).
+        Resource = "${aws_s3tables_table_bucket.lakehouse.arn}/table/*"
       }
     ]
   })

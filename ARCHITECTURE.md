@@ -1388,8 +1388,34 @@ Testado direto contra o S3 Tables real, não só lido no código:
 | `rename_tables.py` (execução real) | mesmo CSV, sem `--dry-run`, contra tabelas de teste reais | ✅ 2 renomeadas, 1 falhou isolada (`NotFoundException`), 1 pulada — `list-tables` confirma os nomes novos |
 | `lambda_handler.handler()` | invocado direto com um evento S3 simulado, apontando pro CSV real no bucket | ✅ renomeou as duas tabelas de volta e escreveu `table-renames/results/<csv>.json` com o relatório certo |
 | Terraform (`table_admin.tf` + lifecycle do bucket) | `terraform validate` + `terraform plan` contra o state remoto real | válido; plano limpo — 6 recursos novos, 1 alterado (lifecycle), 0 destruídos |
+| Lambda **de verdade**, disparada por evento S3 real (não invocação direta) | subiu um CSV real em `table-renames/`, esperou o evento disparar sozinho | ❌ na 1ª tentativa — achou o bug abaixo; ✅ depois de corrigido |
 
-Tabelas e objetos de teste (`silver.admin_probe_a/b`, `table-renames/*`)
-foram removidos depois de cada validação — nada de teste ficou no bucket
-real.
+Tabelas e objetos de teste (`silver.admin_probe_a/b`, `silver.e2e_probe`,
+`table-renames/*`) foram removidos depois de cada validação — nada de
+teste ficou no bucket real.
+
+### 10.6 IAM: `s3tables:RenameTable` autoriza contra o recurso de *tabela*, não o bucket
+
+**Sintoma:** achado só no teste de ponta a ponta de verdade — subir um CSV
+real em `table-renames/` e deixar o evento S3 disparar a Lambda sozinha
+(diferente de invocar `lambda_handler.handler()` direto, que eu já tinha
+feito e passou). O relatório em `table-renames/results/*.json` veio com
+`"status": "failed"` e `AccessDeniedException: ... not authorized to
+perform: s3tables:RenameTable on resource:
+arn:...:bucket/.../table/<uuid> because no identity-based policy allows
+the s3tables:RenameTable action`.
+**Causa:** a policy da Lambda dava `Resource =
+aws_s3tables_table_bucket.lakehouse.arn` — o ARN do **table bucket**. Mas
+`s3tables:RenameTable`, como o próprio erro revela, autoriza contra o ARN
+da **tabela** (`.../bucket/<nome>/table/<uuid>`), um recurso diferente na
+hierarquia de IAM do S3 Tables, não o bucket que a contém.
+**Por que passou em todos os testes manuais antes:** `rename_tables.py`
+rodado via CLI (§10.5, linhas 2-3) usava minhas próprias credenciais
+(`terraform-admin`, com `AdministratorAccess`), não a role IAM
+`aws-duckdb-lakehouse-dev-table-admin-lambda` que a Lambda de verdade usa
+— então nenhum desses testes exercitava a permissão específica que
+faltava. Só testar a Lambda **implantada de verdade**, disparada pelo
+gatilho real (evento S3, não invocação manual), rodando sob a IAM role
+real, revelou o problema.
+**Correção:** `Resource = "${aws_s3tables_table_bucket.lakehouse.arn}/table/*"`.
 
