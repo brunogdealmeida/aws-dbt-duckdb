@@ -45,3 +45,10 @@ airflow/.env
 # same real-vs-local-config split as airflow/.env above.
 query_service/.env
 query_service/__pycache__/
+
+# Working CSVs for table_admin/rename_tables.py — real table names you fill
+# in per use, not source code. Not committed on purpose (same reasoning as
+# the .env files above): avoids ever accidentally checking in whatever
+# tables happened to be renamed on a given day.
+table_admin/*.csv
+table_admin/__pycache__/
