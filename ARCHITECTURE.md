@@ -1541,5 +1541,10 @@ confirmado inspecionando o zip gerado (`unzip -l`) antes e depois: só
 **Validado:** com o `excludes` corrigido, `terraform plan` mostrou só a
 `Resource` da policy IAM mudando (do bucket de landing fixo pro coringa
 `*/table-renames/*`) — 0 recursos novos, 1 alterado, 0 destruídos, exatamente
-a mudança esperada e nada além dela.
+a mudança esperada e nada além dela. Depois do `apply` de verdade (via
+push, CI), reproduzido o teste que antes falhava (§10.6/§9): subiu um CSV
+no bucket `datalab-logs-dbt` — nunca mencionado em nenhum lugar do
+Terraform deste projeto — e invocou a Lambda manualmente apontando pra
+lá. Antes, `AccessDeniedException`; agora, `"status": "renamed"` no
+relatório, tabela renomeada de verdade, confirmada e depois limpa.
 
