@@ -1491,31 +1491,41 @@ arquivo de instruções é lido (e onde o relatório é escrito de volta), que
 até aqui só podia ser o bucket de landing (fixo, único bucket com
 `aws_s3_bucket_notification` configurada).
 
-**O que muda:** nova variável `additional_table_rename_bucket_names`
-(lista de nomes de bucket, `[]` por padrão) — cada bucket nessa lista
-ganha a mesma permissão IAM (`s3:GetObject`/`s3:PutObject` em
-`table-renames/*`) que o bucket de landing já tinha, sem precisar mudar
-mais nada.
+**Primeira versão** disso usava uma variável Terraform
+(`additional_table_rename_bucket_names`, lista de buckets) que precisava
+de um `apply` toda vez que um bucket novo entrava. Reconsiderado a pedido
+do usuário — queria algo editável sem depender do Terraform pra cada
+bucket novo — então a policy virou um **coringa por prefixo**, aplicado
+uma única vez:
 
-**O que NÃO muda — e por quê `aws lambda invoke` continua sendo a única
-forma de usar isso:** um evento S3 automático (`aws_s3_bucket_notification`)
-é fiação de infraestrutura, uma coisa por bucket — não dá pra "escolher o
-bucket na hora" pra um gatilho automático, teria que existir uma
-notification (+ `aws_lambda_permission`) configurada em cada bucket de
-antemão. IAM, ao contrário, é uma checagem em tempo de execução — dá pra
-conceder acesso a vários buckets de uma vez e decidir, **a cada
-invocação**, qual deles usar, só variando o `Bucket`/`Key` no payload
-manual do `aws lambda invoke`. Por isso "parametrizar o bucket do CSV" só
-faz sentido pra invocação manual — soltar um arquivo num bucket extra
-dessa lista não dispara nada sozinho.
+```hcl
+Resource = ["arn:aws:s3:::*/table-renames/*"]
+```
+
+Qualquer bucket S3 da conta, contanto que o objeto esteja sob
+`table-renames/`, já pode ser lido/escrito pela Lambda — sem editar
+Terraform, sem `apply`, pra sempre. O único jeito de "escolher o bucket"
+continua sendo o payload do `aws lambda invoke`, e é por isso que isso só
+serve pra invocação **manual**: um gatilho automático
+(`aws_s3_bucket_notification`) é fiação de infraestrutura, uma coisa por
+bucket, configurada de antemão — não dá pra "escolher na hora" pra esse
+caminho. IAM, ao contrário, é uma checagem em tempo de execução, então
+consegue ser genérico desse jeito.
 
 ```bash
 aws lambda invoke \
   --function-name aws-duckdb-lakehouse-dev-table-rename \
   --cli-binary-format raw-in-base64-out \
-  --payload '{"Records":[{"s3":{"bucket":{"name":"<bucket-da-lista>"},"object":{"key":"table-renames/renames.csv"}}}]}' \
+  --payload '{"Records":[{"s3":{"bucket":{"name":"<qualquer-bucket-da-conta>"},"object":{"key":"table-renames/renames.csv"}}}]}' \
   response.json
 ```
+
+**Contrapartida de segurança, sendo direto sobre isso:** essa Lambda passa
+a poder ler e escrever em `table-renames/*` de **qualquer bucket que essa
+conta AWS possui** — não só buckets relacionados a este projeto. Foi uma
+escolha explícita (perguntei antes de trocar de "lista + Terraform" pra
+isso), trocando um controle mais estrito por conveniência de não precisar
+tocar no Terraform pra cada bucket novo.
 
 **Achado testando a mudança em si:** ao rodar `terraform plan` pra validar
 essa alteração, o plano acusou o **código da Lambda mudando** sem eu ter
@@ -1528,7 +1538,8 @@ publicado na Lambda, incluindo potencialmente nomes de tabela reais.
 confirmado inspecionando o zip gerado (`unzip -l`) antes e depois: só
 `rename_tables.py`/`lambda_handler.py` ficam dentro agora.
 
-**Validado:** `terraform plan` com a lista vazia (padrão) deu "No
-changes" depois da correção do `excludes` — confirma que a
-parametrização em si não muda nada do comportamento atual.
+**Validado:** com o `excludes` corrigido, `terraform plan` mostrou só a
+`Resource` da policy IAM mudando (do bucket de landing fixo pro coringa
+`*/table-renames/*`) — 0 recursos novos, 1 alterado, 0 destruídos, exatamente
+a mudança esperada e nada além dela.
 

@@ -48,18 +48,6 @@ resource "aws_iam_role_policy_attachment" "table_admin_lambda_basic" {
   policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
 }
 
-locals {
-  # landing_bucket_name is always allowed (it's what the automatic S3
-  # trigger uses); additional_table_rename_bucket_names extends the same
-  # read/write access to other buckets purely for *manual* `aws lambda
-  # invoke` calls — no aws_s3_bucket_notification is created for these, so
-  # dropping a CSV there does nothing on its own. See ARCHITECTURE.md §10.8
-  # for why: an S3 event trigger and an IAM grant are two separate things,
-  # and only the IAM grant can be parameterized without deploying more
-  # infra per bucket.
-  table_rename_bucket_names = concat([var.landing_bucket_name], var.additional_table_rename_bucket_names)
-}
-
 resource "aws_iam_role_policy" "table_admin_lambda" {
   role = aws_iam_role.table_admin_lambda.id
 
@@ -67,16 +55,27 @@ resource "aws_iam_role_policy" "table_admin_lambda" {
     Version = "2012-10-17"
     Statement = [
       {
-        Sid      = "ReadRenameCsvs"
-        Effect   = "Allow"
-        Action   = ["s3:GetObject"]
-        Resource = [for b in local.table_rename_bucket_names : "arn:aws:s3:::${b}/table-renames/*"]
+        Sid    = "ReadRenameCsvs"
+        Effect = "Allow"
+        Action = ["s3:GetObject"]
+        # Any bucket in the account, scoped only by the table-renames/
+        # prefix — deliberately not limited to landing_bucket_name (which
+        # is all the automatic S3 trigger below ever uses). This is what
+        # makes ad-hoc `aws lambda invoke` calls against a CSV in some
+        # other bucket just work, with no Terraform change and no apply
+        # needed to use a "new" bucket — see ARCHITECTURE.md §10.8 for why
+        # an S3 event trigger (infra wired per bucket ahead of time) and
+        # an IAM grant (a runtime check) are different things, and only
+        # the IAM side can be this open-ended. The tradeoff: this Lambda
+        # can read/write table-renames/* in *any* bucket this AWS account
+        # owns, not just ones related to this project.
+        Resource = ["arn:aws:s3:::*/table-renames/*"]
       },
       {
         Sid      = "WriteRenameReports"
         Effect   = "Allow"
         Action   = ["s3:PutObject"]
-        Resource = [for b in local.table_rename_bucket_names : "arn:aws:s3:::${b}/table-renames/results/*"]
+        Resource = ["arn:aws:s3:::*/table-renames/results/*"]
       },
       {
         Sid    = "RenameTables"
