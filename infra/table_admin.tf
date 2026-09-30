@@ -84,6 +84,11 @@ resource "aws_lambda_function" "table_admin_rename" {
 
   environment {
     variables = {
+      # Only the *default* table bucket now — a row's own table_bucket_arn
+      # column (see rename_tables.py) overrides this per row. IAM below is
+      # still scoped to just this one bucket's tables regardless of what a
+      # CSV asks for; widen it here too if a CSV needs to target a
+      # different table bucket.
       S3_TABLE_BUCKET_ARN = aws_s3tables_table_bucket.lakehouse.arn
     }
   }

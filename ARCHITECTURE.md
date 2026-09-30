@@ -1317,22 +1317,45 @@ Gateway.
 
 ### 10.2 Formato do CSV
 
-Cabeçalho obrigatório: `namespace,name,new_namespace,new_name`
+Cabeçalho obrigatório (colunas mínimas): `namespace,name`. `new_namespace`,
+`new_name` e `table_bucket_arn` são opcionais.
 
-| coluna | obrigatório | efeito se vazio |
+| coluna | obrigatório | efeito se vazio/ausente |
 |---|---|---|
 | `namespace`, `name` | sim | linha é ignorada (`skipped`) |
 | `new_namespace` | não | mantém a tabela no mesmo namespace |
 | `new_name` | não | mantém o mesmo nome (só move de namespace) |
+| `table_bucket_arn` | não | usa o padrão — `--table-bucket-arn` no CLI, `S3_TABLE_BUCKET_ARN` na Lambda |
 
 Pelo menos uma de `new_namespace`/`new_name` precisa estar preenchida —
-linha com as duas vazias também é `skipped` (nada a fazer).
+linha com as duas vazias também é `skipped` (nada a fazer). O mesmo vale
+pro ARN: sem `table_bucket_arn` na linha **e** sem um padrão fornecido, a
+linha também é `skipped`, com o motivo no relatório.
 
 ```csv
 namespace,name,new_namespace,new_name
 silver,pedidos_antigo,,orders
 bronze_staging,clientes,silver,
 ```
+
+`table_bucket_arn` por linha é útil quando você tem mais de um table
+bucket e quer misturar, no mesmo CSV, tabelas de buckets diferentes — ou
+simplesmente não quer depender do padrão fixado no Terraform:
+
+```csv
+namespace,name,new_name,table_bucket_arn
+silver,pedidos_antigo,orders,arn:aws:s3tables:us-east-1:123456789012:bucket/prod-lakehouse
+silver,clientes_antigo,clients,arn:aws:s3tables:us-east-1:123456789012:bucket/staging-lakehouse
+```
+
+**Mas atenção:** isso só funciona se a IAM role da Lambda tiver permissão
+`s3tables:RenameTable` no bucket que a linha pede — hoje ela só tem no
+único table bucket que o Terraform deste projeto cria
+(`aws_s3tables_table_bucket.lakehouse`). Uma linha apontando pra outro
+bucket dá `AccessDeniedException`, mesmo que o ARN esteja certo — a IAM
+precisaria ser ampliada em `infra/table_admin.tf` pra cobrir o(s) bucket(s)
+extra(s). O CLI rodado manualmente não tem essa restrição — usa as
+credenciais de quem está rodando, não uma IAM role fixa.
 
 ### 10.3 Uso
 
@@ -1344,6 +1367,11 @@ python -m table_admin.rename_tables --csv renames.csv \
 
 python -m table_admin.rename_tables --csv renames.csv \
   --table-bucket-arn $(terraform -chdir=infra output -raw s3_tables_bucket_arn)
+```
+`--table-bucket-arn` agora é só o **padrão** — se toda linha do CSV já
+traz seu próprio `table_bucket_arn`, pode omitir a flag inteira:
+```bash
+python -m table_admin.rename_tables --csv renames.csv
 ```
 Sai com código 1 se qualquer linha falhar — dá pra usar em CI/script sem
 precisar parsear a saída.
@@ -1389,6 +1417,7 @@ Testado direto contra o S3 Tables real, não só lido no código:
 | `lambda_handler.handler()` | invocado direto com um evento S3 simulado, apontando pro CSV real no bucket | ✅ renomeou as duas tabelas de volta e escreveu `table-renames/results/<csv>.json` com o relatório certo |
 | Terraform (`table_admin.tf` + lifecycle do bucket) | `terraform validate` + `terraform plan` contra o state remoto real | válido; plano limpo — 6 recursos novos, 1 alterado (lifecycle), 0 destruídos |
 | Lambda **de verdade**, disparada por evento S3 real (não invocação direta) | subiu um CSV real em `table-renames/`, esperou o evento disparar sozinho | ❌ na 1ª tentativa — achou o bug abaixo; ✅ depois de corrigido |
+| `table_bucket_arn` como parâmetro por linha (§10.7) | CSV formato antigo + `--table-bucket-arn`, CSV novo com a coluna sem a flag, Lambda local com env var — contra tabelas reais | ✅ nos três; casos de borda (sem coluna/sem padrão, coluna vazia) verificados isolados |
 
 Tabelas e objetos de teste (`silver.admin_probe_a/b`, `silver.e2e_probe`,
 `table-renames/*`) foram removidos depois de cada validação — nada de
@@ -1422,4 +1451,35 @@ real, revelou o problema.
 CSV real em `table-renames/` e deixando o evento disparar sozinho: dessa
 vez o relatório veio `"status": "renamed"`, e `list-tables` confirmou o
 nome novo no catálogo.
+
+### 10.7 ARN do table bucket virou parâmetro (era fixo via env var/Terraform)
+
+Antes, o ARN do table bucket que `rename_tables.py`/`lambda_handler.py`
+usava vinha **só** de `S3_TABLE_BUCKET_ARN`, uma env var fixada no deploy
+(`infra/table_admin.tf`) — não dava pra escolher outro bucket sem mudar o
+Terraform e reaplicar.
+
+Agora `table_bucket_arn` é uma coluna opcional do CSV (§10.2): cada linha
+pode especificar seu próprio table bucket, e `--table-bucket-arn`
+(CLI)/`S3_TABLE_BUCKET_ARN` (Lambda) viraram só o **padrão** usado quando
+a linha não define o seu. `--table-bucket-arn` no CLI também deixou de
+ser obrigatório — pode omitir se toda linha do CSV já tem sua própria
+coluna.
+
+**Limitação que continua existindo:** a IAM role da Lambda só tem
+`s3tables:RenameTable` no table bucket que este Terraform cria (§10.6) —
+uma linha pedindo outro bucket ainda dá `AccessDeniedException`, mesmo
+com o ARN certo no CSV. O CLI manual não tem essa restrição (usa as
+credenciais de quem roda). Ampliar a IAM da Lambda pra outros buckets é
+uma mudança à parte, não feita aqui.
+
+**Validado** com quatro casos via `rename_one()` isolado (mock do
+cliente, sem chamar a API) — sem coluna + com padrão; com coluna
+sobrepondo o padrão; sem coluna e sem padrão (`skipped`, com o motivo);
+coluna presente mas vazia, cai pro padrão — e depois de ponta a ponta
+contra tabelas reais: CSV no formato antigo (sem `table_bucket_arn`) com
+`--table-bucket-arn`, CSV novo (com a coluna) sem passar a flag, e a
+Lambda local com a env var como padrão. Todos renomearam de verdade;
+`rename_tables.py --dry-run`/CLI antigos continuam funcionando sem
+mudança nenhuma no formato do CSV.
 
