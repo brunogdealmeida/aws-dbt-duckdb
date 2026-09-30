@@ -1483,3 +1483,52 @@ Lambda local com a env var como padrão. Todos renomearam de verdade;
 `rename_tables.py --dry-run`/CLI antigos continuam funcionando sem
 mudança nenhuma no formato do CSV.
 
+### 10.8 Bucket do CSV parametrizável — só pra invocação manual
+
+§10.7 parametrizou **de onde vêm as tabelas** (`table_bucket_arn`). Isso
+aqui é diferente: **de onde vem o próprio CSV** — o bucket S3 onde o
+arquivo de instruções é lido (e onde o relatório é escrito de volta), que
+até aqui só podia ser o bucket de landing (fixo, único bucket com
+`aws_s3_bucket_notification` configurada).
+
+**O que muda:** nova variável `additional_table_rename_bucket_names`
+(lista de nomes de bucket, `[]` por padrão) — cada bucket nessa lista
+ganha a mesma permissão IAM (`s3:GetObject`/`s3:PutObject` em
+`table-renames/*`) que o bucket de landing já tinha, sem precisar mudar
+mais nada.
+
+**O que NÃO muda — e por quê `aws lambda invoke` continua sendo a única
+forma de usar isso:** um evento S3 automático (`aws_s3_bucket_notification`)
+é fiação de infraestrutura, uma coisa por bucket — não dá pra "escolher o
+bucket na hora" pra um gatilho automático, teria que existir uma
+notification (+ `aws_lambda_permission`) configurada em cada bucket de
+antemão. IAM, ao contrário, é uma checagem em tempo de execução — dá pra
+conceder acesso a vários buckets de uma vez e decidir, **a cada
+invocação**, qual deles usar, só variando o `Bucket`/`Key` no payload
+manual do `aws lambda invoke`. Por isso "parametrizar o bucket do CSV" só
+faz sentido pra invocação manual — soltar um arquivo num bucket extra
+dessa lista não dispara nada sozinho.
+
+```bash
+aws lambda invoke \
+  --function-name aws-duckdb-lakehouse-dev-table-rename \
+  --cli-binary-format raw-in-base64-out \
+  --payload '{"Records":[{"s3":{"bucket":{"name":"<bucket-da-lista>"},"object":{"key":"table-renames/renames.csv"}}}]}' \
+  response.json
+```
+
+**Achado testando a mudança em si:** ao rodar `terraform plan` pra validar
+essa alteração, o plano acusou o **código da Lambda mudando** sem eu ter
+tocado em `rename_tables.py`/`lambda_handler.py` — o `data.archive_file`
+de `table_admin.tf` nunca teve `excludes`, então qualquer CSV de trabalho
+deixado em `table_admin/` (como o `rename_tables.csv`/`renames.csv` de
+uso manual — `.gitignore`'ados, mas não fora do disco) ia junto no zip
+publicado na Lambda, incluindo potencialmente nomes de tabela reais.
+**Correção:** `excludes = ["*.csv", "__pycache__"]` no `archive_file` —
+confirmado inspecionando o zip gerado (`unzip -l`) antes e depois: só
+`rename_tables.py`/`lambda_handler.py` ficam dentro agora.
+
+**Validado:** `terraform plan` com a lista vazia (padrão) deu "No
+changes" depois da correção do `excludes` — confirma que a
+parametrização em si não muda nada do comportamento atual.
+

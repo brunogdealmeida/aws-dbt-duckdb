@@ -54,6 +54,12 @@ variable "table_rename_artifacts_retention_days" {
   default     = 30
 }
 
+variable "additional_table_rename_bucket_names" {
+  description = "Extra S3 bucket names (besides landing_bucket_name) the table-rename Lambda's IAM role can read CSVs from / write results to, under a table-renames/ prefix — for manually invoking it (aws lambda invoke) against a CSV sitting in a bucket other than the landing bucket. Empty by default: no automatic S3 trigger is created for these buckets, only the IAM read/write grant — dropping a CSV there does nothing until you invoke the Lambda yourself."
+  type        = list(string)
+  default     = []
+}
+
 variable "container_cpu" {
   type    = number
   default = 2048

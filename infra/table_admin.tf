@@ -16,6 +16,18 @@ data "archive_file" "table_admin_lambda" {
   # No leading dot — see the comment on the equivalent line in
   # query_service.tf.
   output_path = "${path.module}/table_admin_lambda.zip"
+
+  # Without this, any working CSV a developer drops in table_admin/ (e.g.
+  # rename_tables.csv — see .gitignore's table_admin/*.csv, kept out of git
+  # but not out of this zip) gets bundled straight into the deployed Lambda
+  # package. Found by noticing terraform plan wanted to redeploy the
+  # function's code — source_code_hash had drifted purely because such a
+  # file existed on disk at plan time, not because rename_tables.py or
+  # lambda_handler.py had actually changed.
+  excludes = [
+    "*.csv",
+    "__pycache__",
+  ]
 }
 
 resource "aws_iam_role" "table_admin_lambda" {
@@ -36,6 +48,18 @@ resource "aws_iam_role_policy_attachment" "table_admin_lambda_basic" {
   policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
 }
 
+locals {
+  # landing_bucket_name is always allowed (it's what the automatic S3
+  # trigger uses); additional_table_rename_bucket_names extends the same
+  # read/write access to other buckets purely for *manual* `aws lambda
+  # invoke` calls — no aws_s3_bucket_notification is created for these, so
+  # dropping a CSV there does nothing on its own. See ARCHITECTURE.md §10.8
+  # for why: an S3 event trigger and an IAM grant are two separate things,
+  # and only the IAM grant can be parameterized without deploying more
+  # infra per bucket.
+  table_rename_bucket_names = concat([var.landing_bucket_name], var.additional_table_rename_bucket_names)
+}
+
 resource "aws_iam_role_policy" "table_admin_lambda" {
   role = aws_iam_role.table_admin_lambda.id
 
@@ -46,13 +70,13 @@ resource "aws_iam_role_policy" "table_admin_lambda" {
         Sid      = "ReadRenameCsvs"
         Effect   = "Allow"
         Action   = ["s3:GetObject"]
-        Resource = ["arn:aws:s3:::${var.landing_bucket_name}/table-renames/*"]
+        Resource = [for b in local.table_rename_bucket_names : "arn:aws:s3:::${b}/table-renames/*"]
       },
       {
         Sid      = "WriteRenameReports"
         Effect   = "Allow"
         Action   = ["s3:PutObject"]
-        Resource = ["arn:aws:s3:::${var.landing_bucket_name}/table-renames/results/*"]
+        Resource = [for b in local.table_rename_bucket_names : "arn:aws:s3:::${b}/table-renames/results/*"]
       },
       {
         Sid    = "RenameTables"
